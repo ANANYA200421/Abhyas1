@@ -1,5 +1,6 @@
 import type { ActionHandler, ActionPayload, Point2D, RecognizedGesture } from './types';
 import { PointSmoother } from './filter';
+import { gestureRecognizer } from './gestureRecognizer';
 
 export class ActionMapper {
   private listeners: Set<ActionHandler> = new Set();
@@ -145,7 +146,7 @@ export class ActionMapper {
       return;
     }
 
-    // 5. OPEN_PALM (Stop drawing)
+    // 5. OPEN_PALM (Stop drawing / Swipe navigation)
     if (gesture.type === 'OPEN_PALM') {
       if (this.isDrawing) {
         this.isDrawing = false;
@@ -153,6 +154,14 @@ export class ActionMapper {
           type: 'DRAW_END',
           point: smoothedCursor,
         });
+      }
+
+      // Check palm swipe velocity over ~300ms window
+      const swipe = gestureRecognizer.checkSwipe();
+      if (swipe === 'LEFT') {
+        this.dispatch({ type: 'SWIPE_LEFT', point: smoothedCursor });
+      } else if (swipe === 'RIGHT') {
+        this.dispatch({ type: 'SWIPE_RIGHT', point: smoothedCursor });
       }
       return;
     }
