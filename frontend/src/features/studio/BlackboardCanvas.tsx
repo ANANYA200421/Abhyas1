@@ -1,306 +1,281 @@
-import React, { useState, useRef, useEffect } from 'react';
-import type { BlackboardTool } from '../../types/session';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { WebcamView, type WebcamViewHandle } from '../../components/WebcamView';
+import { actionMapper } from '../../gestures/actionMapper';
+import { drawingEngine } from '../../gestures/drawingEngine';
+import type { ActionPayload } from '../../gestures/types';
 
 export const BlackboardCanvas: React.FC = () => {
-  const [activeTool, setActiveTool] = useState<BlackboardTool>('pen');
-  const [activeColor, setActiveColor] = useState<string>('#FFFFFF');
-  const [slideNumber, setSlideNumber] = useState<number>(1);
-  const totalSlides = 3;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const drawingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cursorCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const webcamRef = useRef<WebcamViewHandle | null>(null);
 
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [isDrawing, setIsDrawing] = useState(false);
+  // Background style: 'camera' (transparent drawing over webcam) or 'slate' (drawing over chalkboard)
+  const [backdropMode, setBackdropMode] = useState<'camera' | 'slate'>('camera');
+  const [fistProgress, setFistProgress] = useState<number>(0);
+  const [clearedBanner, setClearedBanner] = useState<boolean>(false);
 
-  // Initialize canvas drawing context
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  // Resize canvases to match container dimensions
+  const updateCanvasDimensions = useCallback(() => {
+    const container = containerRef.current;
+    const drawingCanvas = drawingCanvasRef.current;
+    const cursorCanvas = cursorCanvasRef.current;
 
-    // Set canvas dimensions according to container
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width;
-    canvas.height = rect.height;
+    if (!container || !drawingCanvas || !cursorCanvas) return;
 
-    // Initial hint text on blank canvas
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    const rect = container.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      if (drawingCanvas.width !== rect.width || drawingCanvas.height !== rect.height) {
+        drawingCanvas.width = rect.width;
+        drawingCanvas.height = rect.height;
+        cursorCanvas.width = rect.width;
+        cursorCanvas.height = rect.height;
+        drawingEngine.setCanvas(drawingCanvas);
+      }
+    }
   }, []);
 
-  const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  useEffect(() => {
+    updateCanvasDimensions();
+    window.addEventListener('resize', updateCanvasDimensions);
+    return () => {
+      window.removeEventListener('resize', updateCanvasDimensions);
+    };
+  }, [updateCanvasDimensions]);
 
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-
-    if (activeTool === 'eraser') {
-      ctx.strokeStyle = '#1F1428';
-      ctx.lineWidth = 28;
-    } else if (activeTool === 'highlighter') {
-      ctx.strokeStyle = 'rgba(217, 136, 237, 0.4)';
-      ctx.lineWidth = 18;
-    } else {
-      ctx.strokeStyle = activeColor;
-      ctx.lineWidth = 3;
+  // Subscribe to gesture actions from the gesture engine
+  useEffect(() => {
+    const drawingCanvas = drawingCanvasRef.current;
+    if (drawingCanvas) {
+      drawingEngine.setCanvas(drawingCanvas);
     }
 
-    setIsDrawing(true);
-  };
+    const unsubscribe = actionMapper.subscribe((action: ActionPayload) => {
+      const cursorCanvas = cursorCanvasRef.current;
+      const ctx = cursorCanvas?.getContext('2d');
 
-  const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    const canvas = canvasRef.current;
+      // 1. Air Drawing Actions
+      switch (action.type) {
+        case 'DRAW_START':
+          drawingEngine.startStroke(action.point);
+          break;
+
+        case 'DRAW_MOVE':
+          drawingEngine.addPoint(action.point);
+          break;
+
+        case 'DRAW_END':
+          drawingEngine.endStroke();
+          break;
+
+        case 'ERASE':
+          drawingEngine.eraseAt(action.point, action.pressure || 32);
+          break;
+
+        case 'CLEAR':
+          drawingEngine.clear();
+          setClearedBanner(true);
+          setTimeout(() => setClearedBanner(false), 2000);
+          break;
+      }
+
+      // 2. Cursor & Progress Reticle Drawing on Cursor Overlay Canvas
+      if (cursorCanvas && ctx) {
+        ctx.clearRect(0, 0, cursorCanvas.width, cursorCanvas.height);
+
+        const x = action.point.x * cursorCanvas.width;
+        const y = action.point.y * cursorCanvas.height;
+
+        // FIST 1-second hold timer progress indicator
+        if (action.holdProgress !== undefined && action.holdProgress > 0) {
+          setFistProgress(action.holdProgress);
+
+          ctx.save();
+          // Outer progress ring
+          ctx.beginPath();
+          ctx.arc(x, y, 32, 0, 2 * Math.PI);
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+          ctx.lineWidth = 5;
+          ctx.stroke();
+
+          // Filling arc
+          ctx.beginPath();
+          ctx.arc(x, y, 32, -Math.PI / 2, -Math.PI / 2 + action.holdProgress * 2 * Math.PI);
+          ctx.strokeStyle = '#BA1A1A';
+          ctx.lineWidth = 6;
+          ctx.stroke();
+
+          // Fist icon / text in center
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = 'bold 12px "Plus Jakarta Sans", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('Hold to Clear', x, y - 40);
+          ctx.restore();
+        } else {
+          setFistProgress(0);
+        }
+
+        // Draw cursor reticle based on active action
+        if (action.type === 'ERASE') {
+          // Eraser cursor ring
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(x, y, 30, 0, 2 * Math.PI);
+          ctx.strokeStyle = '#FDE047';
+          ctx.lineWidth = 2.5;
+          ctx.fillStyle = 'rgba(253, 224, 71, 0.2)';
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        } else if (action.type === 'DRAW_MOVE' || action.type === 'DRAW_START' || action.type === 'HOVER') {
+          // Fingertip cursor dot
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(x, y, action.type === 'HOVER' ? 5 : 7, 0, 2 * Math.PI);
+          ctx.fillStyle = drawingEngine.getColor();
+          ctx.shadowColor = '#D988ED';
+          ctx.shadowBlur = 8;
+          ctx.fill();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = '#FFFFFF';
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      drawingEngine.setCanvas(null);
+    };
+  }, []);
+
+  // Mouse fallback drawing support
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = drawingCanvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    ctx.lineTo(x, y);
-    ctx.stroke();
+    const point = {
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    };
+    if (drawingEngine.getTool() === 'eraser') {
+      drawingEngine.eraseAt(point, 30);
+    } else {
+      drawingEngine.startStroke(point);
+    }
   };
 
-  const stopDrawing = () => {
-    setIsDrawing(false);
-  };
-
-  const clearCanvas = () => {
-    const canvas = canvasRef.current;
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.buttons !== 1) return;
+    const canvas = drawingCanvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const rect = canvas.getBoundingClientRect();
+    const point = {
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    };
+    if (drawingEngine.getTool() === 'eraser') {
+      drawingEngine.eraseAt(point, 30);
+    } else {
+      drawingEngine.addPoint(point);
+    }
   };
 
-  const colors = [
-    { label: 'White Chalk', hex: '#FFFFFF' },
-    { label: 'Lavender Chalk', hex: '#D988ED' },
-    { label: 'Yellow Chalk', hex: '#FDE047' },
-    { label: 'Cyan Chalk', hex: '#38BDF8' },
-  ];
+  const handleMouseUp = () => {
+    drawingEngine.endStroke();
+  };
 
   return (
-    <div className="flex-1 flex flex-col h-[calc(100vh-8.5rem)] relative rounded-2xl overflow-hidden bg-[#1F1428] border border-[#7A3A9A]/30 shadow-lg select-none">
-      {/* Blackboard Slate Background Texture & Grid */}
-      <div
-        className="absolute inset-0 opacity-15 pointer-events-none"
-        style={{
-          backgroundImage:
-            'radial-gradient(circle, rgba(255,255,255,0.2) 1px, transparent 1px)',
-          backgroundSize: '24px 24px',
-        }}
-      ></div>
-
-      {/* Top Blackboard Header / Topic Badge */}
-      <div className="absolute top-4 left-6 right-6 flex items-center justify-between z-10 pointer-events-none">
-        <div className="flex items-center gap-3">
-          <span className="px-3.5 py-1 rounded-full bg-white/10 backdrop-blur-md text-white/90 text-xs font-semibold tracking-wide border border-white/10">
-            Physics: Electrostatics &amp; Gauss's Law
-          </span>
-          <span className="px-2.5 py-0.5 rounded-full bg-[#A55FC6]/30 text-[#D988ED] text-[11px] font-mono border border-[#A55FC6]/40">
-            Air-Writing Slate
-          </span>
+    <div
+      ref={containerRef}
+      className="flex-1 flex flex-col h-[calc(100vh-8.5rem)] relative rounded-2xl overflow-hidden bg-[#1E0C29] border border-[#7A3A9A]/30 shadow-lg select-none"
+    >
+      {/* 1. Base Layer: Webcam View (Mirrored 640x480) OR Blackboard Slate */}
+      {backdropMode === 'camera' ? (
+        <div className="absolute inset-0 z-0">
+          <WebcamView
+            ref={webcamRef}
+            className="w-full h-full object-cover"
+            showSkeletonOverlay={false}
+          />
+          {/* Subtle soft dark vignette so chalk drawings contrast vividly */}
+          <div className="absolute inset-0 bg-[#1E0C29]/35 pointer-events-none"></div>
         </div>
-
-        <div className="flex items-center gap-2">
-          <span className="text-white/60 text-xs font-mono">
-            Slide {slideNumber} / {totalSlides}
-          </span>
+      ) : (
+        <div className="absolute inset-0 bg-[#1F1428] z-0">
+          <div
+            className="absolute inset-0 opacity-15 pointer-events-none"
+            style={{
+              backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.2) 1px, transparent 1px)',
+              backgroundSize: '24px 24px',
+            }}
+          ></div>
         </div>
-      </div>
+      )}
 
-      {/* Hardcoded Pedagogical Chalk Diagram & Formulas */}
-      <div className="absolute inset-0 pointer-events-none flex flex-col justify-center px-12 z-0">
-        <div className="max-w-2xl text-white/80 space-y-4">
-          {/* Formula 1 */}
-          <div className="inline-block px-4 py-2 rounded-xl bg-white/5 border border-white/10 backdrop-blur-sm">
-            <span className="text-sm font-mono text-[#D988ED] font-bold block mb-1">
-              Gauss's Flux Theorem:
-            </span>
-            <div className="text-2xl font-serif tracking-wider text-white flex items-center gap-2">
-              <span>Φ<sub>E</sub> = ∮ </span>
-              <span className="text-[#FDE047]">E</span>
-              <span> · d</span>
-              <span className="text-[#38BDF8]">A</span>
-              <span> = </span>
-              <span className="inline-flex flex-col items-center text-sm leading-tight">
-                <span className="border-b border-white px-1">Q<sub>enc</sub></span>
-                <span>ε₀</span>
-              </span>
-            </div>
-          </div>
-
-          {/* Diagram Illustration */}
-          <div className="flex items-center gap-6 pt-2">
-            <svg
-              className="w-48 h-32 opacity-70"
-              viewBox="0 0 200 120"
-              fill="none"
-              stroke="currentColor"
-            >
-              {/* Gaussian Surface Sphere */}
-              <ellipse
-                cx="90"
-                cy="60"
-                rx="60"
-                ry="45"
-                stroke="#D988ED"
-                strokeWidth="2"
-                strokeDasharray="4 4"
-              />
-              <circle cx="90" cy="60" r="10" fill="#FDE047" stroke="#FFFFFF" strokeWidth="1.5" />
-              <text x="86" y="64" fill="#1F1428" fontSize="12" fontWeight="bold">
-                +q
-              </text>
-              {/* Vector Lines */}
-              <path d="M90 50 L90 15" stroke="#38BDF8" strokeWidth="2" markerEnd="url(#arrow)" />
-              <path d="M100 60 L140 60" stroke="#38BDF8" strokeWidth="2" />
-              <path d="M80 60 L40 60" stroke="#38BDF8" strokeWidth="2" />
-              <path d="M90 70 L90 105" stroke="#38BDF8" strokeWidth="2" />
-              <text x="145" y="64" fill="#38BDF8" fontSize="11" fontFamily="monospace">
-                E-Field
-              </text>
-            </svg>
-
-            <div className="text-xs text-white/60 space-y-1 font-mono">
-              <p>• Electric flux through a closed surface</p>
-              <p>• Proportional to enclosed charge Q<sub>enc</sub></p>
-              <p>• Symmetry simplifies field calculation</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Interactive Freehand Chalk Canvas for Teacher */}
+      {/* 2. Middle Layer: Transparent Drawing Canvas (Strokes and Bezier curves) */}
       <canvas
-        ref={canvasRef}
-        onMouseDown={startDrawing}
-        onMouseMove={draw}
-        onMouseUp={stopDrawing}
-        onMouseLeave={stopDrawing}
-        className="w-full h-full cursor-crosshair z-10"
-        title="Click & drag to write on blackboard"
+        ref={drawingCanvasRef}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        className="absolute inset-0 w-full h-full cursor-crosshair z-10"
+        title="Air draw with Index Point or click & drag with mouse"
       />
 
-      {/* Floating Lesson Toolbar Dock (From DESIGN.md) */}
-      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-4 py-2 rounded-full bg-white/95 backdrop-blur-md shadow-2xl border border-[#EDDCEF]">
-        {/* Pen Tool */}
-        <button
-          type="button"
-          onClick={() => setActiveTool('pen')}
-          title="Chalk Pen"
-          className={`flex items-center gap-1.5 px-4 py-2 rounded-full font-semibold text-xs transition-all cursor-pointer ${
-            activeTool === 'pen'
-              ? 'bg-[#813DA2] text-white shadow-md scale-105'
-              : 'text-[#4D4350] hover:bg-[#F9E0FF]'
-          }`}
-        >
-          <span className="material-symbols-outlined text-[17px]">edit</span>
-          <span>Pen</span>
-        </button>
+      {/* 3. Top Overlay Layer: Fingertip Cursor & Gesture Feedback (Reticle / FIST Progress) */}
+      <canvas
+        ref={cursorCanvasRef}
+        className="absolute inset-0 w-full h-full pointer-events-none z-20"
+      />
 
-        {/* Highlighter Tool */}
-        <button
-          type="button"
-          onClick={() => setActiveTool('highlighter')}
-          title="Highlighter"
-          className={`flex items-center gap-1.5 px-3 py-2 rounded-full font-semibold text-xs transition-all cursor-pointer ${
-            activeTool === 'highlighter'
-              ? 'bg-[#813DA2] text-white shadow-md scale-105'
-              : 'text-[#4D4350] hover:bg-[#F9E0FF]'
-          }`}
-        >
-          <span className="material-symbols-outlined text-[17px]">ink_highlighter</span>
-          <span>Highlight</span>
-        </button>
+      {/* Top Header / Mode Switch Bar */}
+      <div className="absolute top-4 left-6 right-6 flex items-center justify-between z-30 pointer-events-none">
+        <div className="flex items-center gap-2 pointer-events-auto">
+          <span className="px-3.5 py-1 rounded-full bg-black/60 backdrop-blur-md text-white/95 text-xs font-semibold tracking-wide border border-white/15 shadow-sm">
+            Air-Writing Blackboard
+          </span>
 
-        {/* Eraser Tool */}
-        <button
-          type="button"
-          onClick={() => setActiveTool('eraser')}
-          title="Slate Eraser"
-          className={`flex items-center gap-1.5 px-3 py-2 rounded-full font-semibold text-xs transition-all cursor-pointer ${
-            activeTool === 'eraser'
-              ? 'bg-[#813DA2] text-white shadow-md scale-105'
-              : 'text-[#4D4350] hover:bg-[#F9E0FF]'
-          }`}
-        >
-          <span className="material-symbols-outlined text-[17px]">ink_eraser</span>
-          <span>Eraser</span>
-        </button>
-
-        {/* Vertical divider */}
-        <div className="w-[1px] h-6 bg-[#EDDCEF]"></div>
-
-        {/* Chalk Color Swatches */}
-        <div className="flex items-center gap-1.5 px-1">
-          {colors.map((c) => (
-            <button
-              key={c.hex}
-              type="button"
-              onClick={() => {
-                setActiveColor(c.hex);
-                setActiveTool('pen');
-              }}
-              title={c.label}
-              className={`w-6 h-6 rounded-full border-2 transition-all cursor-pointer ${
-                activeColor === c.hex && activeTool === 'pen'
-                  ? 'scale-125 border-[#813DA2] ring-2 ring-[#F7D8FF]'
-                  : 'border-white/80 hover:scale-110'
-              }`}
-              style={{ backgroundColor: c.hex }}
-            />
-          ))}
+          {/* Toggle between Camera View and Slate Backdrop */}
+          <button
+            type="button"
+            onClick={() => setBackdropMode((m) => (m === 'camera' ? 'slate' : 'camera'))}
+            className="px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-white/80 hover:text-white text-xs font-medium border border-white/15 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+          >
+            <span className="material-symbols-outlined text-[15px] text-[#D988ED]">
+              {backdropMode === 'camera' ? 'videocam' : 'blackboard'}
+            </span>
+            <span>{backdropMode === 'camera' ? 'Camera Backdrop' : 'Slate Backdrop'}</span>
+          </button>
         </div>
 
-        {/* Vertical divider */}
-        <div className="w-[1px] h-6 bg-[#EDDCEF]"></div>
-
-        {/* Clear Slate Button */}
-        <button
-          type="button"
-          onClick={clearCanvas}
-          title="Clear Slate"
-          className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-semibold text-[#BA1A1A] hover:bg-red-50 transition-all cursor-pointer"
-        >
-          <span className="material-symbols-outlined text-[16px]">delete_sweep</span>
-          <span>Clear</span>
-        </button>
-
-        {/* Slide navigation controls */}
-        <div className="flex items-center gap-1 pl-1">
-          <button
-            type="button"
-            onClick={() => setSlideNumber((s) => Math.max(1, s - 1))}
-            disabled={slideNumber === 1}
-            title="Previous Page"
-            className="w-7 h-7 rounded-full flex items-center justify-center text-[#4D4350] hover:bg-[#F9E0FF] disabled:opacity-30 cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[16px]">chevron_left</span>
-          </button>
-          <span className="text-[11px] font-mono font-bold text-[#7A3A9A]">
-            {slideNumber}/{totalSlides}
+        {/* Real-time Gesture Guidance Chips & Fist Progress */}
+        <div className="flex items-center gap-2">
+          {fistProgress > 0 && (
+            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-red-950/80 border border-red-500/50 backdrop-blur-md">
+              <span className="text-[11px] font-bold text-red-400">Clearing Board...</span>
+              <div className="w-16 h-2 bg-red-900/50 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-red-500 transition-all duration-75"
+                  style={{ width: `${Math.round(fistProgress * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+          <span className="px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-white/80 text-[11px] font-mono border border-white/10">
+            ☝️ Point to Draw • 🖐️ Palm to Stop • ✌️ 2 Fingers Erase • ✊ Hold 1s Fist to Clear
           </span>
-          <button
-            type="button"
-            onClick={() => setSlideNumber((s) => Math.min(totalSlides, s + 1))}
-            disabled={slideNumber === totalSlides}
-            title="Next Page"
-            className="w-7 h-7 rounded-full flex items-center justify-center text-[#4D4350] hover:bg-[#F9E0FF] disabled:opacity-30 cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[16px]">chevron_right</span>
-          </button>
         </div>
       </div>
+
+      {/* Flash Banner when FIST clears board */}
+      {clearedBanner && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 px-5 py-2 rounded-full bg-red-600/90 text-white font-bold text-xs backdrop-blur-md shadow-xl border border-white/20 animate-bounce z-30 pointer-events-none">
+          Board Cleared via Fist Gesture!
+        </div>
+      )}
     </div>
   );
 };
