@@ -1,4 +1,4 @@
-import type { ActionHandler, ActionPayload, RecognizedGesture } from './types';
+import type { ActionHandler, ActionPayload, Point2D, RecognizedGesture } from './types';
 import { PointSmoother } from './filter';
 
 export class ActionMapper {
@@ -8,6 +8,15 @@ export class ActionMapper {
   private isDrawing = false;
   private fistHoldStart: number | null = null;
   private hasFistCleared = false;
+  private wasPinching = false;
+  private activeContainerRect: DOMRect | null = null;
+
+  /**
+   * Optional reference rect to translate normalized (0-1) coordinates to client pixels
+   */
+  setContainerRect(rect: DOMRect | null): void {
+    this.activeContainerRect = rect;
+  }
 
   /**
    * Subscribe to dispatched gesture actions. Returns unsubscribe function.
@@ -35,13 +44,41 @@ export class ActionMapper {
     const rawCursor = gesture.cursor;
     const smoothedCursor = this.smoother.filter(rawCursor, timestamp);
 
-    // Always emit HOVER so UI can show custom gesture reticle / cursor
+    // Always emit HOVER so UI can show the visible cursor dot
     this.dispatch({
       type: 'HOVER',
       point: smoothedCursor,
     });
 
-    // 1. FIST HANDLING (Hold for ~1 second to clear board)
+    // 1. PINCH (Toolbar button click / selection)
+    if (gesture.type === 'PINCH') {
+      if (this.isDrawing) {
+        this.isDrawing = false;
+        this.dispatch({ type: 'DRAW_END', point: smoothedCursor });
+      }
+
+      if (!this.wasPinching) {
+        this.wasPinching = true;
+        this.dispatch({
+          type: 'PINCH',
+          point: smoothedCursor,
+        });
+
+        // Trigger pinch click on hovering target
+        this.triggerPinchClick(smoothedCursor);
+      }
+      return;
+    } else {
+      if (this.wasPinching) {
+        this.wasPinching = false;
+        this.dispatch({
+          type: 'PINCH_RELEASE',
+          point: smoothedCursor,
+        });
+      }
+    }
+
+    // 2. FIST HANDLING (Hold for ~1 second to clear board)
     if (gesture.type === 'FIST') {
       if (this.isDrawing) {
         this.isDrawing = false;
@@ -64,7 +101,6 @@ export class ActionMapper {
           holdProgress: 1,
         });
       } else {
-        // Broadcast hold progress so UI can render the filling circle/reticle
         this.dispatch({
           type: 'HOVER',
           point: smoothedCursor,
@@ -73,12 +109,11 @@ export class ActionMapper {
       }
       return;
     } else {
-      // Reset fist timer when released
       this.fistHoldStart = null;
       this.hasFistCleared = false;
     }
 
-    // 2. TWO_FINGERS (Eraser under fingertip)
+    // 3. TWO_FINGERS (Eraser under fingertip)
     if (gesture.type === 'TWO_FINGERS') {
       if (this.isDrawing) {
         this.isDrawing = false;
@@ -88,21 +123,7 @@ export class ActionMapper {
       this.dispatch({
         type: 'ERASE',
         point: smoothedCursor,
-        pressure: 35, // Erase radius
-      });
-      return;
-    }
-
-    // 3. PINCH (Toolbar button click / object pick-up)
-    if (gesture.type === 'PINCH') {
-      if (this.isDrawing) {
-        this.isDrawing = false;
-        this.dispatch({ type: 'DRAW_END', point: smoothedCursor });
-      }
-
-      this.dispatch({
-        type: 'PINCH',
-        point: smoothedCursor,
+        pressure: 35,
       });
       return;
     }
@@ -124,7 +145,7 @@ export class ActionMapper {
       return;
     }
 
-    // 5. OPEN_PALM (Stop drawing / navigation)
+    // 5. OPEN_PALM (Stop drawing)
     if (gesture.type === 'OPEN_PALM') {
       if (this.isDrawing) {
         this.isDrawing = false;
@@ -146,10 +167,38 @@ export class ActionMapper {
     }
   }
 
+  /**
+   * Virtual click on element currently underneath the fingertip cursor
+   */
+  private triggerPinchClick(point: Point2D): void {
+    let clientX = point.x * window.innerWidth;
+    let clientY = point.y * window.innerHeight;
+
+    if (this.activeContainerRect) {
+      clientX = this.activeContainerRect.left + point.x * this.activeContainerRect.width;
+      clientY = this.activeContainerRect.top + point.y * this.activeContainerRect.height;
+    }
+
+    const el = document.elementFromPoint(clientX, clientY);
+    if (el) {
+      const target = el.closest('button, [data-gesture-target], a, input') as HTMLElement | null;
+      if (target) {
+        target.click();
+
+        // Visual click feedback effect
+        target.classList.add('ring-4', 'ring-[#D988ED]', 'scale-110');
+        setTimeout(() => {
+          target.classList.remove('ring-4', 'ring-[#D988ED]', 'scale-110');
+        }, 300);
+      }
+    }
+  }
+
   reset(): void {
     this.isDrawing = false;
     this.fistHoldStart = null;
     this.hasFistCleared = false;
+    this.wasPinching = false;
     this.smoother.reset();
   }
 }

@@ -4,13 +4,17 @@ import { StudioHeader } from '../components/StudioHeader';
 import { ToolTabs } from '../features/studio/ToolTabs';
 import { BlackboardCanvas } from '../features/studio/BlackboardCanvas';
 import { GestureStatusPanel } from '../features/studio/GestureStatusPanel';
+import { GestureCursor } from '../components/GestureCursor';
 import type { StudioTab } from '../types/session';
 
 export const ActiveSessionPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<StudioTab>('blackboard');
 
   return (
-    <div className="bg-[#FFF7FC] text-[#2F0346] antialiased min-h-screen overflow-hidden">
+    <div className="bg-[#FFF7FC] text-[#2F0346] antialiased min-h-screen overflow-hidden relative">
+      {/* Visible Gesture Reticle Cursor */}
+      <GestureCursor />
+
       {/* Left Icon Rail Sidebar */}
       <Sidebar variant="rail" />
 
