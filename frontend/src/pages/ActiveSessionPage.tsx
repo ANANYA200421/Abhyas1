@@ -7,6 +7,7 @@ import { GestureStatusPanel } from '../features/studio/GestureStatusPanel';
 import { GestureCursor } from '../components/GestureCursor';
 import { ModelViewer } from '../features/models/ModelViewer';
 import { TextbookViewer } from '../features/textbook/TextbookViewer';
+import { CircuitLab } from '../features/circuit/CircuitLab';
 import type { StudioTab } from '../types/session';
 
 export const ActiveSessionPage: React.FC = () => {
@@ -38,13 +39,16 @@ export const ActiveSessionPage: React.FC = () => {
             {/* Tab 2: 3D Model Viewer */}
             {activeTab === '3d-model' && <ModelViewer />}
 
+            {/* Tab 3: Circuit Lab */}
+            {activeTab === 'circuit-lab' && <CircuitLab />}
+
             {/* Tab 4: Smart Textbook Viewer */}
             {activeTab === 'smart-textbook' && <TextbookViewer />}
 
-            {/* Placeholder for tabs 3 and 5 (Circuit Lab, Slides) */}
-            {activeTab !== 'blackboard' && activeTab !== '3d-model' && activeTab !== 'smart-textbook' && (
+            {/* Placeholder for tab 5 (Slides) */}
+            {activeTab === 'slides' && (
               <div className="flex-1 flex items-center justify-center rounded-2xl bg-[#FEEFFF] border border-[#EDDCEF] text-[#4A2160] font-semibold">
-                Select Virtual Blackboard, 3D Model, or Smart Textbook
+                Slides
               </div>
             )}
 
