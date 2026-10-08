@@ -175,6 +175,23 @@ export class DrawingEngine {
   }
 
   /**
+   * Returns copy of current strokes list.
+   */
+  getStrokes(): Stroke[] {
+    return [...this.strokes];
+  }
+
+  /**
+   * Replaces current strokes and redraws.
+   */
+  setStrokes(strokes: Stroke[]): void {
+    this.strokes = [...strokes];
+    this.redoStack = [];
+    this.currentStroke = null;
+    this.redrawAll();
+  }
+
+  /**
    * Clears all strokes on the blackboard.
    */
   clear(): void {

@@ -8,6 +8,7 @@ import { GestureCursor } from '../components/GestureCursor';
 import { ModelViewer } from '../features/models/ModelViewer';
 import { TextbookViewer } from '../features/textbook/TextbookViewer';
 import { CircuitLab } from '../features/circuit/CircuitLab';
+import { SlidesViewer } from '../features/slides/SlidesViewer';
 import type { StudioTab } from '../types/session';
 
 export const ActiveSessionPage: React.FC = () => {
@@ -45,12 +46,8 @@ export const ActiveSessionPage: React.FC = () => {
             {/* Tab 4: Smart Textbook Viewer */}
             {activeTab === 'smart-textbook' && <TextbookViewer />}
 
-            {/* Placeholder for tab 5 (Slides) */}
-            {activeTab === 'slides' && (
-              <div className="flex-1 flex items-center justify-center rounded-2xl bg-[#FEEFFF] border border-[#EDDCEF] text-[#4A2160] font-semibold">
-                Slides
-              </div>
-            )}
+            {/* Tab 5: Slides */}
+            {activeTab === 'slides' && <SlidesViewer />}
 
             {/* Right-Hand Webcam & Gesture Status Panel */}
             <GestureStatusPanel />
