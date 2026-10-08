@@ -1,7 +1,8 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { WebcamView, type WebcamViewHandle } from '../../components/WebcamView';
 import { actionMapper } from '../../gestures/actionMapper';
-import { drawingEngine } from '../../gestures/drawingEngine';
+import { drawingEngine, type StrokeTool } from '../../gestures/drawingEngine';
+import { FloatingToolbar, type StrokeSizeType } from './FloatingToolbar';
 import type { ActionPayload } from '../../gestures/types';
 
 export const BlackboardCanvas: React.FC = () => {
@@ -14,6 +15,78 @@ export const BlackboardCanvas: React.FC = () => {
   const [backdropMode, setBackdropMode] = useState<'camera' | 'slate'>('camera');
   const [fistProgress, setFistProgress] = useState<number>(0);
   const [clearedBanner, setClearedBanner] = useState<boolean>(false);
+
+  // Toolbar state
+  const [activeTool, setActiveTool] = useState<StrokeTool>('pen');
+  const [activeColor, setActiveColor] = useState<string>('#FFFFFF');
+  const [activeSize, setActiveSize] = useState<StrokeSizeType>('medium');
+
+  // Map stroke size strings to pixel numbers
+  const sizeMap: Record<StrokeSizeType, number> = {
+    fine: 3,
+    medium: 7,
+    bold: 14,
+  };
+
+  const handleToolChange = (tool: StrokeTool) => {
+    setActiveTool(tool);
+    drawingEngine.setTool(tool);
+  };
+
+  const handleColorChange = (color: string) => {
+    setActiveColor(color);
+    drawingEngine.setColor(color);
+    if (activeTool === 'eraser') {
+      setActiveTool('pen');
+      drawingEngine.setTool('pen');
+    }
+  };
+
+  const handleSizeChange = (size: StrokeSizeType) => {
+    setActiveSize(size);
+    drawingEngine.setSize(sizeMap[size]);
+  };
+
+  const handleUndo = useCallback(() => {
+    drawingEngine.undo();
+  }, []);
+
+  const handleRedo = useCallback(() => {
+    drawingEngine.redo();
+  }, []);
+
+  const handleClear = useCallback(() => {
+    drawingEngine.clear();
+    setClearedBanner(true);
+    setTimeout(() => setClearedBanner(false), 2000);
+  }, []);
+
+  const handleSavePNG = useCallback(() => {
+    const video = webcamRef.current?.getVideoElement();
+    drawingEngine.exportCompositePNG(video);
+  }, []);
+
+  // Keyboard shortcuts: Ctrl+Z (Undo) and Ctrl+Y / Ctrl+Shift+Z (Redo)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [handleUndo, handleRedo]);
 
   // Resize canvases to match container dimensions
   const updateCanvasDimensions = useCallback(() => {
@@ -48,13 +121,16 @@ export const BlackboardCanvas: React.FC = () => {
     const drawingCanvas = drawingCanvasRef.current;
     if (drawingCanvas) {
       drawingEngine.setCanvas(drawingCanvas);
+      drawingEngine.setTool(activeTool);
+      drawingEngine.setColor(activeColor);
+      drawingEngine.setSize(sizeMap[activeSize]);
     }
 
     const unsubscribe = actionMapper.subscribe((action: ActionPayload) => {
       const cursorCanvas = cursorCanvasRef.current;
       const ctx = cursorCanvas?.getContext('2d');
 
-      // 1. Air Drawing Actions
+      // 1. Gesture Actions
       switch (action.type) {
         case 'DRAW_START':
           drawingEngine.startStroke(action.point);
@@ -73,9 +149,7 @@ export const BlackboardCanvas: React.FC = () => {
           break;
 
         case 'CLEAR':
-          drawingEngine.clear();
-          setClearedBanner(true);
-          setTimeout(() => setClearedBanner(false), 2000);
+          handleClear();
           break;
       }
 
@@ -91,25 +165,22 @@ export const BlackboardCanvas: React.FC = () => {
           setFistProgress(action.holdProgress);
 
           ctx.save();
-          // Outer progress ring
           ctx.beginPath();
           ctx.arc(x, y, 32, 0, 2 * Math.PI);
           ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
           ctx.lineWidth = 5;
           ctx.stroke();
 
-          // Filling arc
           ctx.beginPath();
           ctx.arc(x, y, 32, -Math.PI / 2, -Math.PI / 2 + action.holdProgress * 2 * Math.PI);
           ctx.strokeStyle = '#BA1A1A';
           ctx.lineWidth = 6;
           ctx.stroke();
 
-          // Fist icon / text in center
           ctx.fillStyle = '#FFFFFF';
           ctx.font = 'bold 12px "Plus Jakarta Sans", sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillText('Hold to Clear', x, y - 40);
+          ctx.fillText('Hold 1s to Clear', x, y - 40);
           ctx.restore();
         } else {
           setFistProgress(0);
@@ -117,7 +188,6 @@ export const BlackboardCanvas: React.FC = () => {
 
         // Draw cursor reticle based on active action
         if (action.type === 'ERASE') {
-          // Eraser cursor ring
           ctx.save();
           ctx.beginPath();
           ctx.arc(x, y, 30, 0, 2 * Math.PI);
@@ -128,7 +198,6 @@ export const BlackboardCanvas: React.FC = () => {
           ctx.stroke();
           ctx.restore();
         } else if (action.type === 'DRAW_MOVE' || action.type === 'DRAW_START' || action.type === 'HOVER') {
-          // Fingertip cursor dot
           ctx.save();
           ctx.beginPath();
           ctx.arc(x, y, action.type === 'HOVER' ? 5 : 7, 0, 2 * Math.PI);
@@ -148,7 +217,7 @@ export const BlackboardCanvas: React.FC = () => {
       unsubscribe();
       drawingEngine.setCanvas(null);
     };
-  }, []);
+  }, [activeTool, activeColor, activeSize, handleClear]);
 
   // Mouse fallback drawing support
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -199,7 +268,7 @@ export const BlackboardCanvas: React.FC = () => {
             className="w-full h-full object-cover"
             showSkeletonOverlay={false}
           />
-          {/* Subtle soft dark vignette so chalk drawings contrast vividly */}
+          {/* Subtle dark vignette so chalk drawings contrast vividly */}
           <div className="absolute inset-0 bg-[#1E0C29]/35 pointer-events-none"></div>
         </div>
       ) : (
@@ -225,7 +294,7 @@ export const BlackboardCanvas: React.FC = () => {
         title="Air draw with Index Point or click & drag with mouse"
       />
 
-      {/* 3. Top Overlay Layer: Fingertip Cursor & Gesture Feedback (Reticle / FIST Progress) */}
+      {/* 3. Top Overlay Layer: Fingertip Cursor & Gesture Feedback */}
       <canvas
         ref={cursorCanvasRef}
         className="absolute inset-0 w-full h-full pointer-events-none z-20"
@@ -238,7 +307,6 @@ export const BlackboardCanvas: React.FC = () => {
             Air-Writing Blackboard
           </span>
 
-          {/* Toggle between Camera View and Slate Backdrop */}
           <button
             type="button"
             onClick={() => setBackdropMode((m) => (m === 'camera' ? 'slate' : 'camera'))}
@@ -270,10 +338,24 @@ export const BlackboardCanvas: React.FC = () => {
         </div>
       </div>
 
+      {/* 4. Full Floating Toolbar */}
+      <FloatingToolbar
+        activeTool={activeTool}
+        onToolChange={handleToolChange}
+        activeColor={activeColor}
+        onColorChange={handleColorChange}
+        activeSize={activeSize}
+        onSizeChange={handleSizeChange}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onClear={handleClear}
+        onSavePNG={handleSavePNG}
+      />
+
       {/* Flash Banner when FIST clears board */}
       {clearedBanner && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 px-5 py-2 rounded-full bg-red-600/90 text-white font-bold text-xs backdrop-blur-md shadow-xl border border-white/20 animate-bounce z-30 pointer-events-none">
-          Board Cleared via Fist Gesture!
+          Board Cleared!
         </div>
       )}
     </div>
