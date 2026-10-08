@@ -267,6 +267,7 @@ export const BlackboardCanvas: React.FC = () => {
             ref={webcamRef}
             className="w-full h-full object-cover"
             showSkeletonOverlay={false}
+            enableTracking={false}
           />
           {/* Subtle dark vignette so chalk drawings contrast vividly */}
           <div className="absolute inset-0 bg-[#1E0C29]/35 pointer-events-none"></div>

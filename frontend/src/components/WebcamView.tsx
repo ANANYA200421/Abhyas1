@@ -20,15 +20,21 @@ interface WebcamViewProps {
   className?: string;
   overlayChildren?: React.ReactNode;
   showSkeletonOverlay?: boolean;
+  enableTracking?: boolean;
 }
 
 type CameraErrorType = 'permission_denied' | 'not_found' | 'already_in_use' | 'other' | null;
+
+// Module-level shared stream to prevent camera lock conflicts between components
+let sharedMediaStream: MediaStream | null = null;
+let activeStreamUsers = 0;
 
 export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
   onTelemetryUpdate,
   className = '',
   overlayChildren,
   showSkeletonOverlay = true,
+  enableTracking = true,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -54,16 +60,21 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
 
   // Cleanly terminate camera tracks and frame loop
   const stopStream = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+    activeStreamUsers = Math.max(0, activeStreamUsers - 1);
+    if (activeStreamUsers === 0 && sharedMediaStream) {
+      sharedMediaStream.getTracks().forEach((track) => track.stop());
+      sharedMediaStream = null;
     }
+    streamRef.current = null;
+
     if (animationFrameRef.current !== null) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
-    actionMapper.reset();
-  }, []);
+    if (enableTracking) {
+      actionMapper.reset();
+    }
+  }, [enableTracking]);
 
   // Frame processing loop
   const processFrame = useCallback(() => {
@@ -137,17 +148,30 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
     setErrorMessage('');
 
     try {
-      await handTracker.initialize();
+      if (enableTracking) {
+        await handTracker.initialize();
+      }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: 'user',
-        },
-        audio: false,
-      });
+      let stream: MediaStream;
+      if (
+        sharedMediaStream &&
+        sharedMediaStream.active &&
+        sharedMediaStream.getVideoTracks().some((t) => t.readyState === 'live')
+      ) {
+        stream = sharedMediaStream;
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            facingMode: 'user',
+          },
+          audio: false,
+        });
+        sharedMediaStream = stream;
+      }
 
+      activeStreamUsers++;
       streamRef.current = stream;
 
       if (videoRef.current) {
@@ -155,7 +179,7 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
         videoRef.current.onloadedmetadata = () => {
           videoRef.current?.play().then(() => {
             setIsLoading(false);
-            if (animationFrameRef.current === null) {
+            if (enableTracking && animationFrameRef.current === null) {
               animationFrameRef.current = requestAnimationFrame(processFrame);
             }
           }).catch((err) => {
@@ -192,7 +216,7 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
         );
       }
     }
-  }, [processFrame]);
+  }, [processFrame, enableTracking]);
 
   useEffect(() => {
     startCamera();

@@ -35,21 +35,31 @@ export const ActiveSessionPage: React.FC = () => {
           {/* Active Session Split: Interactive Pedagogical Tool on Left & Gesture Status on Right */}
           <div className="flex-1 flex gap-5 min-h-0">
             {/* Tab 1: Virtual Blackboard */}
-            {activeTab === 'blackboard' && <BlackboardCanvas />}
+            <div className={`flex-1 flex min-h-0 ${activeTab === 'blackboard' ? '' : 'hidden'}`}>
+              <BlackboardCanvas />
+            </div>
 
             {/* Tab 2: 3D Model Viewer */}
-            {activeTab === '3d-model' && <ModelViewer />}
+            <div className={`flex-1 flex min-h-0 ${activeTab === '3d-model' ? '' : 'hidden'}`}>
+              <ModelViewer />
+            </div>
 
             {/* Tab 3: Circuit Lab */}
-            {activeTab === 'circuit-lab' && <CircuitLab />}
+            <div className={`flex-1 flex min-h-0 ${activeTab === 'circuit-lab' ? '' : 'hidden'}`}>
+              <CircuitLab />
+            </div>
 
             {/* Tab 4: Smart Textbook Viewer */}
-            {activeTab === 'smart-textbook' && <TextbookViewer />}
+            <div className={`flex-1 flex min-h-0 ${activeTab === 'smart-textbook' ? '' : 'hidden'}`}>
+              <TextbookViewer />
+            </div>
 
             {/* Tab 5: Slides */}
-            {activeTab === 'slides' && <SlidesViewer />}
+            <div className={`flex-1 flex min-h-0 ${activeTab === 'slides' ? '' : 'hidden'}`}>
+              <SlidesViewer />
+            </div>
 
-            {/* Right-Hand Webcam & Gesture Status Panel */}
+            {/* Right-Hand Webcam & Gesture Status Panel - Always Persistent */}
             <GestureStatusPanel />
           </div>
         </main>
