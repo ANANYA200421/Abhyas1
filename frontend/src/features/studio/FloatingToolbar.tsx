@@ -1,7 +1,7 @@
 import React from 'react';
 import type { StrokeTool } from '../../gestures/drawingEngine';
-
-export type StrokeSizeType = 'fine' | 'medium' | 'bold';
+import { COLORS, SIZES, type StrokeSizeType } from './toolbarOptions';
+export type { StrokeSizeType } from './toolbarOptions';
 
 interface FloatingToolbarProps {
   activeTool: StrokeTool;
@@ -17,20 +17,6 @@ interface FloatingToolbarProps {
   canUndo?: boolean;
   canRedo?: boolean;
 }
-
-export const COLORS = [
-  { label: 'White Chalk', hex: '#FFFFFF' },
-  { label: 'Lavender', hex: '#D988ED' },
-  { label: 'Sun Yellow', hex: '#FDE047' },
-  { label: 'Cyan Blue', hex: '#38BDF8' },
-  { label: 'Emerald Green', hex: '#4ADE80' },
-];
-
-export const SIZES: { id: StrokeSizeType; label: string; iconSize: number }[] = [
-  { id: 'fine', label: 'Fine', iconSize: 4 },
-  { id: 'medium', label: 'Medium', iconSize: 7 },
-  { id: 'bold', label: 'Bold', iconSize: 12 },
-];
 
 export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
   activeTool,

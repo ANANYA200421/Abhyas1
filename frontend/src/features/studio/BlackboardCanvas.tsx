@@ -2,7 +2,8 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { WebcamView, type WebcamViewHandle } from '../../components/WebcamView';
 import { actionMapper } from '../../gestures/actionMapper';
 import { blackboardDrawingEngine, type StrokeTool } from '../../gestures/drawingEngine';
-import { FloatingToolbar, type StrokeSizeType } from './FloatingToolbar';
+import { FloatingToolbar } from './FloatingToolbar';
+import type { StrokeSizeType } from './toolbarOptions';
 import type { ActionPayload } from '../../gestures/types';
 
 // Map stroke size strings to pixel numbers
@@ -157,7 +158,10 @@ export const BlackboardCanvas: React.FC<BlackboardCanvasProps> = ({ isActive = t
 
     let lastStage5LogTime = 0;
     const unsubscribe = actionMapper.subscribe((action: ActionPayload) => {
-      if (!isActive) return;
+      if (!isActive) {
+        setFistProgress((progress) => (progress === 0 ? progress : 0));
+        return;
+      }
 
       const cursorCanvas = cursorCanvasRef.current;
       const ctx = cursorCanvas?.getContext('2d');
@@ -275,7 +279,6 @@ export const BlackboardCanvas: React.FC<BlackboardCanvasProps> = ({ isActive = t
   useEffect(() => {
     if (!isActive) {
       blackboardDrawingEngine.endStroke();
-      setFistProgress(0);
     }
   }, [isActive]);
 
@@ -383,7 +386,7 @@ export const BlackboardCanvas: React.FC<BlackboardCanvasProps> = ({ isActive = t
 
         {/* Real-time Gesture Guidance Chips & Fist Progress */}
         <div className="flex items-center gap-2">
-          {fistProgress > 0 && (
+          {isActive && fistProgress > 0 && (
             <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-red-950/80 border border-red-500/50 backdrop-blur-md">
               <span className="text-[11px] font-bold text-red-400">Clearing Board...</span>
               <div className="w-16 h-2 bg-red-900/50 rounded-full overflow-hidden">

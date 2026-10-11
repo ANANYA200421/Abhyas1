@@ -15,12 +15,41 @@ test('Circuit Solver: parses resistance and voltage strings accurately', () => {
   assert.strictEqual(parseResistance('4.7kΩ'), 4700);
   assert.strictEqual(parseResistance('10k'), 10000);
   assert.strictEqual(parseResistance('1MΩ'), 1000000);
-  assert.strictEqual(parseResistance('invalid'), 100);
+  assert.strictEqual(parseResistance('1mΩ'), 0.001);
+  assert.ok(Number.isNaN(parseResistance('invalid')));
+  assert.ok(Number.isNaN(parseResistance('0Ω')));
+  assert.ok(Number.isNaN(parseResistance('12abc')));
 
   assert.strictEqual(parseVoltage('9V'), 9);
   assert.strictEqual(parseVoltage('12V'), 12);
   assert.strictEqual(parseVoltage('1.5V'), 1.5);
-  assert.strictEqual(parseVoltage('invalid'), 9);
+  assert.ok(Number.isNaN(parseVoltage('invalid')));
+  assert.ok(Number.isNaN(parseVoltage('-9V')));
+});
+
+test('Circuit Solver: rejects invalid electrical values instead of substituting defaults', () => {
+  const components: CircuitComponent[] = [
+    { id: 'bat-1', type: 'battery', x: 100, y: 100, label: 'Battery', value: '9V' },
+    { id: 'res-1', type: 'resistor', x: 200, y: 100, label: 'Resistor', value: 'not an ohm value' },
+  ];
+
+  const result = solveCircuit(components, []);
+  assert.strictEqual(result.circuitTopology, 'invalid');
+  assert.strictEqual(result.currentAmps, 0);
+  assert.match(result.invalidReason ?? '', /valid resistance/);
+  assert.strictEqual(checkCircuit(components, []).title, 'Invalid Circuit');
+  assert.strictEqual(checkCircuit(components, [
+    { id: 'w1', fromCompId: 'bat-1', fromTerminal: 'pos', toCompId: 'res-1', toTerminal: 'a' },
+  ]).title, 'Invalid Circuit');
+
+  const connected = [
+    { ...components[1], value: '220Ω' },
+  ];
+  const invalidSource = [{ ...components[0], value: 'NaN V' }, connected[0]];
+  const invalidCheck = checkCircuit(invalidSource, [
+    { id: 'w1', fromCompId: 'bat-1', fromTerminal: 'pos', toCompId: 'res-1', toTerminal: 'a' },
+  ]);
+  assert.strictEqual(invalidCheck.title, 'Invalid Circuit');
 });
 
 test('Circuit Solver: detects open circuit when no battery is present', () => {
@@ -91,6 +120,22 @@ test('Circuit Solver: calculates Ohm\'s law for single resistor circuit', () => 
   assert.strictEqual(check.isCorrect, true);
 });
 
+test('Circuit Solver: calculates current through the configured bulb resistance', () => {
+  const components: CircuitComponent[] = [
+    { id: 'bat-1', type: 'battery', x: 100, y: 100, label: 'Battery', value: '9V' },
+    { id: 'bulb-1', type: 'bulb', x: 200, y: 100, label: 'Bulb', value: '24Ω' },
+  ];
+  const wires: Wire[] = [
+    { id: 'w1', fromCompId: 'bat-1', fromTerminal: 'pos', toCompId: 'bulb-1', toTerminal: 'a' },
+    { id: 'w2', fromCompId: 'bulb-1', fromTerminal: 'b', toCompId: 'bat-1', toTerminal: 'neg' },
+  ];
+
+  const result = solveCircuit(components, wires);
+  assert.strictEqual(result.isClosedLoop, true);
+  assert.ok(Math.abs(result.componentCurrents['bulb-1'] - 9 / 24.4) < 0.001);
+  assert.ok(Math.abs(result.componentVoltages['bulb-1'] - result.componentCurrents['bulb-1'] * 24) < 0.001);
+});
+
 test('Circuit Solver: calculates series resistors correctly (R_total = R1 + R2)', () => {
   const components: CircuitComponent[] = [
     { id: 'bat-1', type: 'battery', x: 100, y: 100, label: 'Battery', value: '9V' },
@@ -147,6 +192,65 @@ test('Circuit Solver: calculates parallel resistors correctly (1/R_total = 1/R1 
   assert.ok(Math.abs(res.componentCurrents['res-2'] - 0.09) < 0.003);
 });
 
+test('Circuit Solver: calculates mixed series-parallel networks correctly', () => {
+  const components: CircuitComponent[] = [
+    { id: 'bat-1', type: 'battery', x: 100, y: 100, label: 'Battery', value: '9V' },
+    { id: 'res-1', type: 'resistor', x: 200, y: 100, label: 'Parallel resistor 1', value: '100Ω' },
+    { id: 'res-2', type: 'resistor', x: 200, y: 200, label: 'Parallel resistor 2', value: '100Ω' },
+    { id: 'res-3', type: 'resistor', x: 300, y: 150, label: 'Series resistor', value: '100Ω' },
+  ];
+  const wires: Wire[] = [
+    { id: 'w1', fromCompId: 'bat-1', fromTerminal: 'pos', toCompId: 'res-1', toTerminal: 'a' },
+    { id: 'w2', fromCompId: 'bat-1', fromTerminal: 'pos', toCompId: 'res-2', toTerminal: 'a' },
+    { id: 'w3', fromCompId: 'res-1', fromTerminal: 'b', toCompId: 'res-3', toTerminal: 'a' },
+    { id: 'w4', fromCompId: 'res-2', fromTerminal: 'b', toCompId: 'res-3', toTerminal: 'a' },
+    { id: 'w5', fromCompId: 'res-3', fromTerminal: 'b', toCompId: 'bat-1', toTerminal: 'neg' },
+  ];
+
+  const result = solveCircuit(components, wires);
+  assert.strictEqual(result.isClosedLoop, true);
+  assert.strictEqual(result.circuitTopology, 'complex');
+  assert.ok(Math.abs(result.equivalentResistance - 150) < 1);
+  assert.ok(Math.abs(result.currentAmps - 9 / 150.4) < 0.001);
+  assert.ok(Math.abs(result.componentCurrents['res-1'] - result.componentCurrents['res-2']) < 1e-9);
+});
+
+test('Circuit Solver: resolves disconnected components without introducing phantom current', () => {
+  const components: CircuitComponent[] = [
+    { id: 'bat-1', type: 'battery', x: 100, y: 100, label: 'Battery', value: '9V' },
+    { id: 'res-1', type: 'resistor', x: 200, y: 100, label: 'Connected resistor', value: '100Ω' },
+    { id: 'res-2', type: 'resistor', x: 300, y: 100, label: 'Disconnected resistor', value: '100Ω' },
+  ];
+  const wires: Wire[] = [
+    { id: 'w1', fromCompId: 'bat-1', fromTerminal: 'pos', toCompId: 'res-1', toTerminal: 'a' },
+    { id: 'w2', fromCompId: 'res-1', fromTerminal: 'b', toCompId: 'bat-1', toTerminal: 'neg' },
+  ];
+
+  const result = solveCircuit(components, wires);
+  assert.strictEqual(result.isClosedLoop, true);
+  assert.ok(Math.abs(result.currentAmps - 9 / 100.4) < 0.001);
+  assert.strictEqual(result.componentCurrents['res-2'], 0);
+  assert.strictEqual(result.componentVoltages['res-2'], 0);
+  assert.strictEqual(result.activeComponentIds.has('res-2'), false);
+});
+
+test('Circuit Solver: keeps low-current closed circuits active', () => {
+  const components: CircuitComponent[] = [
+    { id: 'bat-1', type: 'battery', x: 100, y: 100, label: 'Battery', value: '9V' },
+    { id: 'res-1', type: 'resistor', x: 200, y: 100, label: 'Resistor', value: '1000000000Ω' },
+  ];
+  const wires: Wire[] = [
+    { id: 'w1', fromCompId: 'bat-1', fromTerminal: 'pos', toCompId: 'res-1', toTerminal: 'a' },
+    { id: 'w2', fromCompId: 'res-1', fromTerminal: 'b', toCompId: 'bat-1', toTerminal: 'neg' },
+  ];
+
+  const result = solveCircuit(components, wires);
+  assert.strictEqual(result.isClosedLoop, true);
+  assert.strictEqual(result.circuitTopology, 'series');
+  assert.ok(result.currentAmps > 0);
+  assert.ok(result.currentAmps < 0.00000001);
+});
+
 test('Circuit Solver: detects short circuit when battery terminals are wired directly', () => {
   const components: CircuitComponent[] = [
     { id: 'bat-1', type: 'battery', x: 100, y: 100, label: 'Battery', value: '9V' },
@@ -162,6 +266,24 @@ test('Circuit Solver: detects short circuit when battery terminals are wired dir
   const check = checkCircuit(components, wires);
   assert.strictEqual(check.isCorrect, false);
   assert.ok(check.title.includes('Short Circuit'));
+});
+
+test('Circuit Solver: limits current through a component-mediated short consistently', () => {
+  const components: CircuitComponent[] = [
+    { id: 'bat-1', type: 'battery', x: 100, y: 100, label: 'Battery', value: '9V' },
+    { id: 'sw-1', type: 'switch', x: 200, y: 100, label: 'Switch', isOpen: false },
+  ];
+  const wires: Wire[] = [
+    { id: 'w1', fromCompId: 'bat-1', fromTerminal: 'pos', toCompId: 'sw-1', toTerminal: 'a' },
+    { id: 'w2', fromCompId: 'sw-1', fromTerminal: 'b', toCompId: 'bat-1', toTerminal: 'neg' },
+  ];
+
+  const result = solveCircuit(components, wires);
+  assert.strictEqual(result.isShortCircuit, true);
+  assert.ok(result.currentAmps <= 9 / 0.4);
+  assert.ok(result.currentAmps > 20);
+  assert.ok(result.equivalentResistance > 0);
+  assert.ok(Math.abs(result.equivalentResistance * result.currentAmps - result.componentVoltages['sw-1']) < 0.01);
 });
 
 test('Circuit Solver: LED conducts in forward bias and blocks in reverse bias', () => {

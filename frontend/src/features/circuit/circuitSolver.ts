@@ -2,21 +2,23 @@ import type { CircuitComponent, Wire, CircuitCheckResult, SolverResult } from '.
 
 /**
  * Parses electrical resistance string into Ohms (Ω).
- * Handles formats: "220Ω", "100Ω", "1kΩ", "4.7kΩ", "10k", "47", etc.
+ * Handles formats: "220Ω", "100Ω", "1kΩ", "4.7kΩ", "10k", "1MΩ", "47", etc.
  */
 export function parseResistance(val?: string): number {
-  if (!val) return 100;
-  const clean = val.trim().toLowerCase().replace(/ω|ohm|ohms/g, '');
-  if (clean.includes('k')) {
-    const num = parseFloat(clean.replace('k', ''));
-    return isNaN(num) ? 1000 : num * 1000;
-  }
-  if (clean.includes('m')) {
-    const num = parseFloat(clean.replace('m', ''));
-    return isNaN(num) ? 1000000 : num * 1000000;
-  }
-  const num = parseFloat(clean);
-  return isNaN(num) || num <= 0 ? 100 : num;
+  if (!val) return Number.NaN;
+  const match = val.trim().match(/^((?:\d+(?:\.\d*)?|\.\d+))\s*([kKmM]?)\s*(?:Ω|Ω|ohms?)?$/i);
+  if (!match) return Number.NaN;
+
+  const number = Number(match[1]);
+  const multiplier = match[2] === 'k' || match[2] === 'K'
+    ? 1_000
+    : match[2] === 'm'
+      ? 0.001
+      : match[2] === 'M'
+        ? 1_000_000
+        : 1;
+  const resistance = number * multiplier;
+  return Number.isFinite(resistance) && resistance > 0 ? resistance : Number.NaN;
 }
 
 /**
@@ -24,9 +26,29 @@ export function parseResistance(val?: string): number {
  * Handles formats: "9V", "12V", "1.5V", "5V", etc.
  */
 export function parseVoltage(val?: string): number {
-  if (!val) return 9.0;
-  const num = parseFloat(val.replace(/v/gi, '').trim());
-  return isNaN(num) || num <= 0 ? 9.0 : num;
+  if (!val) return Number.NaN;
+  const match = val.trim().match(/^((?:\d+(?:\.\d*)?|\.\d+))\s*V?$/i);
+  if (!match) return Number.NaN;
+  const voltage = Number(match[1]);
+  return Number.isFinite(voltage) && voltage > 0 ? voltage : Number.NaN;
+}
+
+const BATTERY_INTERNAL_RESISTANCE = 0.4;
+const CURRENT_EPSILON = 1e-12;
+
+function invalidResult(reason: string): SolverResult {
+  return {
+    isClosedLoop: false,
+    isShortCircuit: false,
+    activeComponentIds: new Set(),
+    currentAmps: 0,
+    voltage: 0,
+    equivalentResistance: Infinity,
+    componentCurrents: {},
+    componentVoltages: {},
+    invalidReason: reason,
+    circuitTopology: 'invalid',
+  };
 }
 
 /**
@@ -80,7 +102,51 @@ export function solveCircuit(
     };
   }
 
+  const componentById = new Map<string, CircuitComponent>();
+  for (const component of components) {
+    if (!component.id || componentById.has(component.id)) {
+      return invalidResult('Every component must have a unique, non-empty ID.');
+    }
+    componentById.set(component.id, component);
+  }
+
+  if (components.filter((component) => component.type === 'battery').length > 1) {
+    return invalidResult('Only one battery is supported in a circuit.');
+  }
+
   const vSource = parseVoltage(battery.value);
+  if (!Number.isFinite(vSource)) {
+    return invalidResult(`Battery "${battery.label}" must have a valid positive voltage.`);
+  }
+  if (vSource > 1_000_000) {
+    return invalidResult(`Battery "${battery.label}" voltage is outside the supported safe range.`);
+  }
+
+  for (const component of components) {
+    if (component.type === 'resistor' || component.type === 'bulb') {
+      const resistance = parseResistance(component.value);
+      if (!Number.isFinite(resistance) || resistance < 1e-6 || resistance > 1e12) {
+        return invalidResult(
+          `${component.label} must have a valid resistance from 1 µΩ to 1 TΩ.`
+        );
+      }
+    }
+  }
+
+  for (const wire of wires) {
+    const from = componentById.get(wire.fromCompId);
+    const to = componentById.get(wire.toCompId);
+    const fromTerminals = from?.type === 'battery' ? ['pos', 'neg'] : ['a', 'b'];
+    const toTerminals = to?.type === 'battery' ? ['pos', 'neg'] : ['a', 'b'];
+    if (
+      !from ||
+      !to ||
+      !fromTerminals.includes(wire.fromTerminal) ||
+      !toTerminals.includes(wire.toTerminal)
+    ) {
+      return invalidResult(`Wire "${wire.id}" references a missing component or terminal.`);
+    }
+  }
 
   // 1. Group connected terminals into equipotential electrical nodes
   const uf = new UnionFind();
@@ -112,11 +178,11 @@ export function solveCircuit(
       isClosedLoop: true,
       isShortCircuit: true,
       activeComponentIds: new Set([battery.id]),
-      currentAmps: vSource / 0.4, // Internal resistance ~0.4Ω limit
-      voltage: vSource,
-      equivalentResistance: 0.001,
-      componentCurrents: { [battery.id]: vSource / 0.4 },
-      componentVoltages: { [battery.id]: vSource },
+      currentAmps: vSource / BATTERY_INTERNAL_RESISTANCE,
+      voltage: 0,
+      equivalentResistance: 0,
+      componentCurrents: { [battery.id]: vSource / BATTERY_INTERNAL_RESISTANCE },
+      componentVoltages: { [battery.id]: 0 },
       shortCircuitReason: 'Battery terminals connected directly with near-zero load resistance.',
       circuitTopology: 'short',
     };
@@ -174,7 +240,7 @@ export function solveCircuit(
     if (comp.type === 'resistor') {
       r = parseResistance(comp.value);
     } else if (comp.type === 'bulb') {
-      r = 24.0;
+      r = parseResistance(comp.value);
     } else if (comp.type === 'switch') {
       if (comp.isOpen) {
         isOpen = true;
@@ -189,7 +255,7 @@ export function solveCircuit(
       isOpen = true; // DC steady state: capacitor blocks current
     } else if (comp.type === 'led') {
       isLED = true;
-      r = 15.0; // Forward dynamic resistance
+      r = 15.0;
     }
 
     branches.push({
@@ -214,13 +280,56 @@ export function solveCircuit(
     const A: number[][] = Array.from({ length: dim }, () => Array(dim).fill(0));
     const B: number[] = Array(dim).fill(0);
 
-    // Ground equation: V[negIdx] = 0
-    A[negIdx][negIdx] = 1;
-    B[negIdx] = 0;
+    // Fix one reference voltage in each disconnected conductive network.
+    const adjacency = Array.from({ length: numNodes }, () => new Set<number>());
+    adjacency[posIdx].add(negIdx);
+    adjacency[negIdx].add(posIdx);
+    for (const branch of activeBranches) {
+      if (!branch.isOpen) {
+        adjacency[branch.u].add(branch.v);
+        adjacency[branch.v].add(branch.u);
+      }
+    }
 
-    // Node KCL equations for all nodes except ground negIdx
+    const referenceNodes = new Set<number>([negIdx]);
+    const visited = new Set<number>();
+    for (let node = 0; node < numNodes; node++) {
+      if (visited.has(node)) continue;
+      const stack = [node];
+      let reference = node;
+      let includesGround = false;
+      visited.add(node);
+      while (stack.length > 0) {
+        const current = stack.pop()!;
+        reference = Math.min(reference, current);
+        includesGround ||= current === negIdx;
+        for (const neighbor of adjacency[current]) {
+          if (!visited.has(neighbor)) {
+            visited.add(neighbor);
+            stack.push(neighbor);
+          }
+        }
+      }
+      if (!includesGround) referenceNodes.add(reference);
+    }
+
+    for (const reference of referenceNodes) {
+      A[reference][reference] = 1;
+      B[reference] = 0;
+    }
+
+    for (const branch of activeBranches) {
+      if (!branch.isOpen && branch.isLED) {
+        const g = 1.0 / branch.r;
+        B[branch.u] += 2 * g;
+        B[branch.v] -= 2 * g;
+      }
+    }
+    for (const reference of referenceNodes) B[reference] = 0;
+
+    // Node KCL equations, excluding the reference node in each network.
     for (let i = 0; i < numNodes; i++) {
-      if (i === negIdx) continue;
+      if (referenceNodes.has(i)) continue;
 
       for (const b of activeBranches) {
         if (b.isOpen) continue;
@@ -239,9 +348,10 @@ export function solveCircuit(
     // Battery KCL contribution at posIdx: current iBat leaves posIdx
     A[posIdx][numNodes] = 1;
 
-    // Battery voltage definition: V[posIdx] - V[negIdx] = vSource
+    // Thevenin battery model limits fault current using its internal resistance.
     A[numNodes][posIdx] = 1;
     A[numNodes][negIdx] = -1;
+    A[numNodes][numNodes] = -BATTERY_INTERNAL_RESISTANCE;
     B[numNodes] = vSource;
 
     // Gaussian elimination with partial pivoting
@@ -252,7 +362,7 @@ export function solveCircuit(
           maxRow = r;
         }
       }
-      if (Math.abs(A[maxRow][p]) < 1e-12) continue; // Singular or decoupled node
+      if (Math.abs(A[maxRow][p]) < 1e-18) return null;
 
       // Swap rows
       [A[p], A[maxRow]] = [A[maxRow], A[p]];
@@ -286,58 +396,51 @@ export function solveCircuit(
     };
   };
 
-  // First pass solve
-  let sol = solveSystem(branches);
-
-  // Check LED bias: if reverse-biased (V_anode <= V_cathode + 0.05), disable branch and re-solve
-  let needsResolve = false;
-  const filteredBranches = branches.map((b) => {
-    if (b.isLED && sol) {
-      const vA = sol.nodeVoltages[b.anodeIdx!] || 0;
-      const vC = sol.nodeVoltages[b.cathodeIdx!] || 0;
-      if (vA <= vC + 0.05) {
-        needsResolve = true;
-        return { ...b, isOpen: true };
-      }
-    }
-    return b;
-  });
-
-  if (needsResolve) {
-    sol = solveSystem(filteredBranches);
+  // Disable reverse-biased LEDs and re-solve until the remaining forward-biased
+  // LED network is consistent.
+  let activeBranches = branches;
+  let sol: { nodeVoltages: number[]; iBattery: number } | null = null;
+  for (let iteration = 0; iteration <= branches.length; iteration++) {
+    sol = solveSystem(activeBranches);
+    if (!sol) break;
+    const reverseBiasedIds = new Set(
+      activeBranches
+        .filter((branch) => branch.isLED && !branch.isOpen)
+        .filter((branch) => {
+          const anodeVoltage = sol!.nodeVoltages[branch.anodeIdx!] || 0;
+          const cathodeVoltage = sol!.nodeVoltages[branch.cathodeIdx!] || 0;
+          return anodeVoltage - cathodeVoltage <= 2;
+        })
+        .map((branch) => branch.compId)
+    );
+    if (reverseBiasedIds.size === 0) break;
+    activeBranches = activeBranches.map((branch) =>
+      reverseBiasedIds.has(branch.compId) ? { ...branch, isOpen: true } : branch
+    );
   }
 
   if (!sol) {
-    return {
-      isClosedLoop: false,
-      isShortCircuit: false,
-      activeComponentIds: new Set(),
-      currentAmps: 0,
-      voltage: 0,
-      equivalentResistance: Infinity,
-      componentCurrents: {},
-      componentVoltages: {},
-      circuitTopology: 'open',
-    };
+    return invalidResult('The circuit equations could not be solved. Check for invalid connections.');
   }
 
   const { nodeVoltages, iBattery } = sol;
   const currentAmps = Math.abs(iBattery);
+  const terminalVoltage = Math.max(0, nodeVoltages[posIdx] - nodeVoltages[negIdx]);
 
   // 6. Calculate voltages and currents per component
   const componentCurrents: Record<string, number> = {
     [battery.id]: currentAmps,
   };
   const componentVoltages: Record<string, number> = {
-    [battery.id]: vSource,
+    [battery.id]: terminalVoltage,
   };
   const activeComponentIds = new Set<string>();
 
-  if (currentAmps > 0.0005) {
+  if (currentAmps > CURRENT_EPSILON) {
     activeComponentIds.add(battery.id);
   }
 
-  for (const b of branches) {
+  for (const b of activeBranches) {
     const vU = nodeVoltages[b.u] || 0;
     const vV = nodeVoltages[b.v] || 0;
     const drop = Math.abs(vU - vV);
@@ -345,9 +448,9 @@ export function solveCircuit(
 
     if (!b.isOpen) {
       if (b.isLED) {
-        const vA = nodeVoltages[b.anodeIdx!] || 0;
-        const vC = nodeVoltages[b.cathodeIdx!] || 0;
-        iBranch = vA > vC ? drop / b.r : 0;
+        const anodeVoltage = nodeVoltages[b.anodeIdx!] || 0;
+        const cathodeVoltage = nodeVoltages[b.cathodeIdx!] || 0;
+        iBranch = Math.max(0, (anodeVoltage - cathodeVoltage - 2) / b.r);
       } else {
         iBranch = drop / b.r;
       }
@@ -356,13 +459,13 @@ export function solveCircuit(
     componentVoltages[b.compId] = drop;
     componentCurrents[b.compId] = iBranch;
 
-    if (iBranch > 0.0005 || (b.type === 'voltmeter' && drop > 0.1)) {
+    if (iBranch > CURRENT_EPSILON || (b.type === 'voltmeter' && drop > 0.1)) {
       activeComponentIds.add(b.compId);
     }
   }
 
-  const isClosed = currentAmps > 0.0005;
-  const eqResistance = isClosed ? vSource / currentAmps : Infinity;
+  const isClosed = currentAmps > CURRENT_EPSILON;
+  const eqResistance = isClosed ? terminalVoltage / currentAmps : Infinity;
   const isShort = isClosed && eqResistance < 0.2;
 
   // Determine circuit topology
@@ -370,25 +473,34 @@ export function solveCircuit(
   if (isShort) {
     circuitTopology = 'short';
   } else if (isClosed) {
-    // Check if parallel branches exist across common nodes
     const pairCounts = new Map<string, number>();
-    for (const b of branches) {
-      if (!b.isOpen && b.type !== 'voltmeter') {
+    const nodeDegrees = new Map<number, number>();
+    let activeBranchCount = 0;
+    for (const b of activeBranches) {
+      if (!b.isOpen && b.type !== 'voltmeter' && (componentCurrents[b.compId] || 0) > CURRENT_EPSILON) {
         const key = `${Math.min(b.u, b.v)}-${Math.max(b.u, b.v)}`;
         pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+        nodeDegrees.set(b.u, (nodeDegrees.get(b.u) || 0) + 1);
+        nodeDegrees.set(b.v, (nodeDegrees.get(b.v) || 0) + 1);
+        activeBranchCount++;
       }
     }
-    const hasParallel = Array.from(pairCounts.values()).some((c) => c > 1);
-    circuitTopology = hasParallel ? 'parallel' : 'series';
+    if (pairCounts.size === 1 && activeBranchCount > 1) {
+      circuitTopology = 'parallel';
+    } else if (Array.from(nodeDegrees.values()).some((degree) => degree > 2)) {
+      circuitTopology = 'complex';
+    } else {
+      circuitTopology = 'series';
+    }
   }
 
   return {
     isClosedLoop: isClosed && !isShort,
     isShortCircuit: isShort,
     activeComponentIds,
-    currentAmps: isShort ? vSource / 0.4 : currentAmps,
-    voltage: isClosed ? vSource : 0,
-    equivalentResistance: isShort ? 0.01 : eqResistance,
+    currentAmps,
+    voltage: isClosed ? terminalVoltage : 0,
+    equivalentResistance: eqResistance,
     componentCurrents,
     componentVoltages,
     shortCircuitReason: isShort
@@ -418,6 +530,16 @@ export function checkCircuit(
     };
   }
 
+  const solver = solveCircuit(components, wires);
+  if (solver.invalidReason) {
+    return {
+      isCorrect: false,
+      title: 'Invalid Circuit',
+      reason: solver.invalidReason,
+      details: ['Correct the invalid component value or wire connection before checking the circuit.'],
+    };
+  }
+
   if (wires.length === 0) {
     return {
       isCorrect: false,
@@ -429,8 +551,6 @@ export function checkCircuit(
       ],
     };
   }
-
-  const solver = solveCircuit(components, wires);
 
   // 1. Short Circuit Warning
   if (solver.isShortCircuit) {
@@ -504,7 +624,7 @@ export function checkCircuit(
   const led = components.find((c) => c.type === 'led');
   if (led) {
     const ledCurrent = solver.componentCurrents[led.id] || 0;
-    if (ledCurrent <= 0.0005) {
+    if (ledCurrent <= CURRENT_EPSILON) {
       return {
         isCorrect: false,
         title: 'LED Polarity Error',
@@ -522,15 +642,13 @@ export function checkCircuit(
     solver.currentAmps < 1.0
       ? `${(solver.currentAmps * 1000).toFixed(1)} mA`
       : `${solver.currentAmps.toFixed(2)} A`;
-  const reqStr = `${Math.round(solver.equivalentResistance)} Ω`;
-
   return {
     isCorrect: true,
     title: 'Circuit Verified! 🎉',
-    reason: `Valid closed circuit operating normally (${solver.circuitTopology.toUpperCase()} topology). Total loop current: ${currentStr} at ${solver.voltage.toFixed(1)}V.`,
+    reason: `Valid closed circuit operating normally (${solver.circuitTopology.toUpperCase()} topology). Total loop current: ${currentStr} at ${solver.voltage.toFixed(2)}V.`,
     details: [
-      `Equivalent Load Resistance: ${reqStr}`,
-      `Ohm's Law verified: I = ${solver.voltage.toFixed(1)}V / ${reqStr} = ${currentStr}`,
+      `Effective Load Resistance: ${solver.equivalentResistance.toFixed(1)} Ω`,
+      `Ohm's Law verified: I = ${solver.voltage.toFixed(2)}V / ${solver.equivalentResistance.toFixed(1)} Ω ≈ ${currentStr}`,
       'All component polarities and connections meet electrical standards.',
     ],
   };

@@ -52,5 +52,6 @@ export interface SolverResult {
   componentCurrents: Record<string, number>;
   componentVoltages: Record<string, number>;
   shortCircuitReason?: string;
-  circuitTopology: 'series' | 'parallel' | 'complex' | 'open' | 'short';
+  invalidReason?: string;
+  circuitTopology: 'series' | 'parallel' | 'complex' | 'open' | 'short' | 'invalid';
 }

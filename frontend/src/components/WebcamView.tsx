@@ -48,7 +48,7 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
   const [errorMessage, setErrorMessage] = useState<string>('');
 
   // Performance telemetry refs to avoid per-frame React re-renders
-  const lastTimeRef = useRef<number>(performance.now());
+  const lastTimeRef = useRef<number>(0);
   const frameCountRef = useRef<number>(0);
   const currentFpsRef = useRef<number>(0);
   const lastTelemetryUpdateRef = useRef<number>(0);
@@ -89,7 +89,7 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
   }, [enableTracking]);
 
   // Frame processing loop
-  const processFrame = useCallback(() => {
+  const processFrame = useCallback(function processFrame() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
@@ -163,9 +163,6 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
   // Request camera and initialize MediaPipe
   const startCamera = useCallback(async () => {
     if (!isMountedRef.current) return;
-    setIsLoading(true);
-    setErrorType(null);
-    setErrorMessage('');
 
     try {
       if (enableTracking) {
@@ -218,6 +215,8 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
               if (!isMountedRef.current) return;
               setIsLoading(false);
               if (enableTracking && animationFrameRef.current === null) {
+                lastTimeRef.current = performance.now();
+                frameCountRef.current = 0;
                 animationFrameRef.current = requestAnimationFrame(processFrame);
               }
             })
@@ -268,6 +267,9 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
 
   const handleRetry = useCallback(() => {
     stopStream();
+    setIsLoading(true);
+    setErrorType(null);
+    setErrorMessage('');
     startCamera();
   }, [stopStream, startCamera]);
 

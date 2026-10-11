@@ -144,6 +144,7 @@ export const SlidesViewer: React.FC<SlidesViewerProps> = ({ isActive = true }) =
   const [imageSlides, setImageSlides] = useState<string[]>([]);
   const [pdfFile, setPdfFile] = useState<string | File | null>(null);
   const [pdfNumPages, setPdfNumPages] = useState<number>(0);
+  const [slideWidth, setSlideWidth] = useState<number>(960);
 
   // Current slide index (1-based for PDF, 0-based for default/images)
   const [currentSlideIndex, setCurrentSlideIndex] = useState<number>(0);
@@ -203,9 +204,25 @@ export const SlidesViewer: React.FC<SlidesViewerProps> = ({ isActive = true }) =
   }, [getCurrentSlideKey, isActive]);
 
   useEffect(() => {
+    const container = slideContainerRef.current;
+    const observer =
+      container && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            const width = container.clientWidth || 960;
+            setSlideWidth((currentWidth) =>
+              currentWidth === width ? currentWidth : width
+            );
+            updateCanvasSize();
+          })
+        : null;
+    if (container && observer) observer.observe(container);
+
     updateCanvasSize();
     window.addEventListener('resize', updateCanvasSize);
-    return () => window.removeEventListener('resize', updateCanvasSize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', updateCanvasSize);
+    };
   }, [updateCanvasSize]);
 
   useEffect(() => {
@@ -801,7 +818,7 @@ export const SlidesViewer: React.FC<SlidesViewerProps> = ({ isActive = true }) =
                 >
                   <Page
                     pageNumber={currentSlideIndex + 1}
-                    width={slideContainerRef.current?.clientWidth || 960}
+                    width={slideWidth}
                     renderTextLayer={false}
                     renderAnnotationLayer={false}
                   />

@@ -9,7 +9,7 @@ const PALETTE_ITEMS: { type: ComponentType; label: string; icon: string; value: 
   { type: 'battery', label: 'Battery', icon: 'battery_charging_full', value: '9V' },
   { type: 'resistor', label: 'Resistor', icon: 'reorder', value: '220Ω' },
   { type: 'led', label: 'LED', icon: 'light', value: 'Red' },
-  { type: 'bulb', label: 'Bulb', icon: 'lightbulb', value: '60W' },
+  { type: 'bulb', label: 'Bulb', icon: 'lightbulb', value: '24Ω' },
   { type: 'switch', label: 'Switch', icon: 'toggle_on', value: 'SPST' },
   { type: 'capacitor', label: 'Capacitor', icon: 'pause', value: '100µF' },
   { type: 'ammeter', label: 'Ammeter', icon: 'speed', value: 'mA' },
@@ -47,6 +47,7 @@ export const CircuitLab: React.FC = () => {
 
   // Compute live current, voltage, resistance & active components via physics solver
   const {
+    invalidReason,
     isClosedLoop,
     isShortCircuit,
     activeComponentIds,
@@ -84,7 +85,7 @@ export const CircuitLab: React.FC = () => {
       { id: 'bat-1', type: 'battery', x: 120, y: 220, label: 'Battery', value: '9V' },
       { id: 'res-1', type: 'resistor', x: 260, y: 120, label: 'Resistor', value: '100Ω' },
       { id: 'amm-1', type: 'ammeter', x: 400, y: 120, label: 'Ammeter', value: 'mA' },
-      { id: 'bulb-1', type: 'bulb', x: 540, y: 220, label: 'Bulb', value: '60W' },
+      { id: 'bulb-1', type: 'bulb', x: 540, y: 220, label: 'Bulb', value: '24Ω' },
       { id: 'sw-1', type: 'switch', x: 330, y: 320, label: 'Switch', value: 'SPST', isOpen: false },
     ]);
     setWires([
@@ -137,7 +138,7 @@ export const CircuitLab: React.FC = () => {
     if (!wiringStart) {
       setWiringStart({ compId, terminal });
     } else {
-      if (wiringStart.compId !== compId) {
+      if (wiringStart.compId !== compId || wiringStart.terminal !== terminal) {
         // Prevent duplicate wires between same two terminals
         const alreadyConnected = wires.some(
           (w) =>
@@ -300,7 +301,12 @@ export const CircuitLab: React.FC = () => {
                   : 'bg-slate-400'
               }`}
             />
-            {isShortCircuit ? (
+            {invalidReason ? (
+              <span className="text-red-600 font-extrabold flex items-center gap-1" role="status">
+                <span className="material-symbols-outlined text-[15px]">error</span>
+                <span>INVALID CIRCUIT</span>
+              </span>
+            ) : isShortCircuit ? (
               <span className="text-red-600 font-extrabold flex items-center gap-1">
                 <span className="material-symbols-outlined text-[15px]">warning</span>
                 <span>SHORT CIRCUIT (R &lt; 0.2Ω)</span>
@@ -388,7 +394,9 @@ export const CircuitLab: React.FC = () => {
               // Curved bezier wire path
               const midX = (start.x + end.x) / 2;
               const midY = (start.y + end.y) / 2 + 15;
-              const pathD = `M ${start.x} ${start.y} Q ${midX} ${midY} ${end.x} ${end.y}`;
+              const pathD = wire.fromCompId === wire.toCompId
+                ? `M ${start.x} ${start.y} C ${start.x + 40} ${start.y - 70} ${end.x - 40} ${end.y - 70} ${end.x} ${end.y}`
+                : `M ${start.x} ${start.y} Q ${midX} ${midY} ${end.x} ${end.y}`;
 
               return (
                 <g
@@ -415,7 +423,7 @@ export const CircuitLab: React.FC = () => {
                   <path
                     d={pathD}
                     fill="none"
-                    stroke={isShortCircuit ? '#EF4444' : isPowered ? '#10B981' : '#813DA2'}
+                    stroke={invalidReason ? '#EF4444' : isShortCircuit ? '#EF4444' : isPowered ? '#10B981' : '#813DA2'}
                     className="group-hover:stroke-rose-600 transition-colors"
                     strokeWidth="3"
                     strokeLinecap="round"
@@ -529,7 +537,7 @@ export const CircuitLab: React.FC = () => {
                   {/* Ammeter */}
                   {comp.type === 'ammeter' && (
                     <div className="text-[10px] font-mono font-bold text-blue-600">
-                      A: {isClosedLoop ? `${((componentCurrents[comp.id] || 0) * 1000).toFixed(1)}mA` : '0mA'}
+                      A: {`${((componentCurrents[comp.id] || 0) * 1000).toFixed(1)}mA`}
                     </div>
                   )}
 
@@ -635,7 +643,13 @@ export const CircuitLab: React.FC = () => {
           <span>Click Switch to Toggle Closed/Open</span>
         </span>
         <span className="text-emerald-400 font-bold">
-          {isClosedLoop ? '⚡ Loop Closed & Active' : 'Circuit Open'}
+          {invalidReason
+            ? 'Invalid circuit'
+            : isShortCircuit
+              ? 'Short circuit — current limited'
+              : isClosedLoop
+                ? '⚡ Loop Closed & Active'
+                : 'Circuit Open'}
         </span>
       </div>
     </div>
