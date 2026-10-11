@@ -45,8 +45,20 @@ export const CircuitLab: React.FC = () => {
   // Evaluation modal
   const [checkResult, setCheckResult] = useState<CircuitCheckResult | null>(null);
 
-  // Compute live current & active components
-  const { isClosedLoop, activeComponentIds, currentAmps, voltage } = solveCircuit(components, wires);
+  // Compute live current, voltage, resistance & active components via physics solver
+  const {
+    isClosedLoop,
+    isShortCircuit,
+    activeComponentIds,
+    currentAmps,
+    voltage,
+    equivalentResistance,
+    componentCurrents,
+    componentVoltages,
+  } = solveCircuit(components, wires);
+
+  // Incremental ID generator ref for deterministic IDs
+  const nextIdRef = useRef<number>(10);
 
   // Preset 1: Simple LED Circuit
   const loadPresetLED = () => {
@@ -88,11 +100,12 @@ export const CircuitLab: React.FC = () => {
 
   // Add component from palette onto canvas
   const handleAddComponent = (type: ComponentType, label: string, value: string) => {
+    const nextIdx = nextIdRef.current++;
     const newComp: CircuitComponent = {
-      id: `${type}-${Date.now().toString(36).substring(4)}`,
+      id: `${type}-${nextIdx}`,
       type,
-      x: 200 + Math.random() * 120,
-      y: 160 + Math.random() * 80,
+      x: 180 + (nextIdx % 4) * 60,
+      y: 140 + (nextIdx % 3) * 50,
       label,
       value,
       isOpen: type === 'switch' ? false : undefined,
@@ -107,11 +120,16 @@ export const CircuitLab: React.FC = () => {
     );
   };
 
-  // Delete selected component
+  // Delete selected component and connected wires
   const deleteComponent = (id: string) => {
     setComponents((prev) => prev.filter((c) => c.id !== id));
     setWires((prev) => prev.filter((w) => w.fromCompId !== id && w.toCompId !== id));
     setSelectedCompId(null);
+  };
+
+  // Delete wire
+  const deleteWire = (id: string) => {
+    setWires((prev) => prev.filter((w) => w.id !== id));
   };
 
   // Handle terminal click for wiring
@@ -120,15 +138,30 @@ export const CircuitLab: React.FC = () => {
       setWiringStart({ compId, terminal });
     } else {
       if (wiringStart.compId !== compId) {
-        // Create new connecting wire
-        const newWire: Wire = {
-          id: `w-${Date.now().toString(36)}`,
-          fromCompId: wiringStart.compId,
-          fromTerminal: wiringStart.terminal,
-          toCompId: compId,
-          toTerminal: terminal,
-        };
-        setWires((prev) => [...prev, newWire]);
+        // Prevent duplicate wires between same two terminals
+        const alreadyConnected = wires.some(
+          (w) =>
+            (w.fromCompId === wiringStart.compId &&
+              w.fromTerminal === wiringStart.terminal &&
+              w.toCompId === compId &&
+              w.toTerminal === terminal) ||
+            (w.fromCompId === compId &&
+              w.fromTerminal === terminal &&
+              w.toCompId === wiringStart.compId &&
+              w.toTerminal === wiringStart.terminal)
+        );
+
+        if (!alreadyConnected) {
+          const wireId = `w-${nextIdRef.current++}`;
+          const newWire: Wire = {
+            id: wireId,
+            fromCompId: wiringStart.compId,
+            fromTerminal: wiringStart.terminal,
+            toCompId: compId,
+            toTerminal: terminal,
+          };
+          setWires((prev) => [...prev, newWire]);
+        }
       }
       setWiringStart(null);
     }
@@ -257,17 +290,36 @@ export const CircuitLab: React.FC = () => {
         {/* Live Telemetry Readout & Check Circuit Button */}
         <div className="flex items-center gap-3">
           {/* Live Circuit Current & Voltage Badge */}
-          <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-[#FEEFFF] border border-[#F6D9FF] text-xs font-mono font-bold">
+          <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#FEEFFF] border border-[#F6D9FF] text-xs font-mono font-bold shadow-xs">
             <span
               className={`w-2 h-2 rounded-full ${
-                isClosedLoop ? 'bg-emerald-500 animate-pulse' : 'bg-red-400'
+                isShortCircuit
+                  ? 'bg-red-600 animate-ping'
+                  : isClosedLoop
+                  ? 'bg-emerald-500 animate-pulse'
+                  : 'bg-slate-400'
               }`}
             />
-            <span className="text-[#813DA2]">
-              I: {isClosedLoop ? `${Math.round(currentAmps * 1000)} mA` : '0 mA'}
-            </span>
-            <span className="text-[#7A6F83]">|</span>
-            <span className="text-[#2F0346]">V: {voltage.toFixed(1)} V</span>
+            {isShortCircuit ? (
+              <span className="text-red-600 font-extrabold flex items-center gap-1">
+                <span className="material-symbols-outlined text-[15px]">warning</span>
+                <span>SHORT CIRCUIT (R &lt; 0.2Ω)</span>
+              </span>
+            ) : (
+              <>
+                <span className="text-[#813DA2]">
+                  I: {isClosedLoop ? (currentAmps < 1.0 ? `${(currentAmps * 1000).toFixed(1)} mA` : `${currentAmps.toFixed(2)} A`) : '0 mA'}
+                </span>
+                <span className="text-[#7A6F83]">|</span>
+                <span className="text-[#2F0346]">V: {voltage.toFixed(1)} V</span>
+                {isClosedLoop && isFinite(equivalentResistance) && (
+                  <>
+                    <span className="text-[#7A6F83]">|</span>
+                    <span className="text-indigo-700">R: {Math.round(equivalentResistance)} Ω</span>
+                  </>
+                )}
+              </>
+            )}
           </div>
 
           {/* Check Circuit Button */}
@@ -311,7 +363,7 @@ export const CircuitLab: React.FC = () => {
 
           {/* Wiring Instructions */}
           <div className="mt-auto p-2.5 rounded-xl bg-[#FEEFFF] text-[10px] text-[#7A6F83] leading-relaxed border border-[#F6D9FF]">
-            💡 <strong className="text-[#2F0346]">How to Wire:</strong> Click any component dot, then click another dot to connect with wire.
+            💡 <strong className="text-[#2F0346]">How to Wire:</strong> Click any terminal dot, then another dot to wire. Click any wire to delete it.
           </div>
         </aside>
 
@@ -339,9 +391,18 @@ export const CircuitLab: React.FC = () => {
               const pathD = `M ${start.x} ${start.y} Q ${midX} ${midY} ${end.x} ${end.y}`;
 
               return (
-                <g key={wire.id}>
+                <g
+                  key={wire.id}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteWire(wire.id);
+                  }}
+                  className="pointer-events-auto cursor-pointer group"
+                >
+                  {/* Invisible wide hit target for easy clicking */}
+                  <path d={pathD} fill="none" stroke="transparent" strokeWidth="16" />
                   {/* Outer wire glow if current is flowing */}
-                  {isPowered && (
+                  {isPowered && !isShortCircuit && (
                     <path
                       d={pathD}
                       fill="none"
@@ -354,7 +415,8 @@ export const CircuitLab: React.FC = () => {
                   <path
                     d={pathD}
                     fill="none"
-                    stroke={isPowered ? '#10B981' : '#813DA2'}
+                    stroke={isShortCircuit ? '#EF4444' : isPowered ? '#10B981' : '#813DA2'}
+                    className="group-hover:stroke-rose-600 transition-colors"
                     strokeWidth="3"
                     strokeLinecap="round"
                   />
@@ -412,9 +474,16 @@ export const CircuitLab: React.FC = () => {
 
                   {/* Resistor */}
                   {comp.type === 'resistor' && (
-                    <span className="material-symbols-outlined text-[19px] text-amber-700">
-                      reorder
-                    </span>
+                    <div className="flex flex-col items-center">
+                      <span className="material-symbols-outlined text-[18px] text-amber-700">
+                        reorder
+                      </span>
+                      {isClosedLoop && (componentVoltages[comp.id] || 0) > 0.05 && (
+                        <span className="text-[8px] font-mono text-amber-900 font-bold -mt-0.5">
+                          {(componentVoltages[comp.id] || 0).toFixed(1)}V
+                        </span>
+                      )}
+                    </div>
                   )}
 
                   {/* LED with Glowing State */}
@@ -460,14 +529,14 @@ export const CircuitLab: React.FC = () => {
                   {/* Ammeter */}
                   {comp.type === 'ammeter' && (
                     <div className="text-[10px] font-mono font-bold text-blue-600">
-                      A: {isOn ? '0.04A' : '0A'}
+                      A: {isClosedLoop ? `${((componentCurrents[comp.id] || 0) * 1000).toFixed(1)}mA` : '0mA'}
                     </div>
                   )}
 
                   {/* Voltmeter */}
                   {comp.type === 'voltmeter' && (
                     <div className="text-[10px] font-mono font-bold text-purple-600">
-                      V: {isClosedLoop ? '9.0V' : '0V'}
+                      V: {`${(componentVoltages[comp.id] || 0).toFixed(1)}V`}
                     </div>
                   )}
 

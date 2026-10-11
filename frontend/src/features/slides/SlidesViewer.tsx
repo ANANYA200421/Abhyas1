@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { actionMapper } from '../../gestures/actionMapper';
-import { drawingEngine, type Stroke, type StrokeTool } from '../../gestures/drawingEngine';
+import { slidesDrawingEngine, type Stroke, type StrokeTool } from '../../gestures/drawingEngine';
 import type { ActionPayload } from '../../gestures/types';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -134,7 +134,11 @@ type SlideSourceType = 'default' | 'images' | 'pdf';
 
 const PALETTE_COLORS = ['#FFFFFF', '#FDE047', '#38BDF8', '#F43F5E', '#10B981'];
 
-export const SlidesViewer: React.FC = () => {
+export interface SlidesViewerProps {
+  isActive?: boolean;
+}
+
+export const SlidesViewer: React.FC<SlidesViewerProps> = ({ isActive = true }) => {
   // Source modes: default presentations, user uploaded images, or user uploaded PDF
   const [sourceType, setSourceType] = useState<SlideSourceType>('default');
   const [imageSlides, setImageSlides] = useState<string[]>([]);
@@ -143,6 +147,7 @@ export const SlidesViewer: React.FC = () => {
 
   // Current slide index (1-based for PDF, 0-based for default/images)
   const [currentSlideIndex, setCurrentSlideIndex] = useState<number>(0);
+  const [, setHistoryVersion] = useState<number>(0);
 
   // Per-slide annotation storage: key = slide identifier string, value = Stroke[]
   const annotationsMapRef = useRef<Record<string, Stroke[]>>({});
@@ -183,16 +188,19 @@ export const SlidesViewer: React.FC = () => {
 
     const rect = container.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
+      if (isActive) {
+        actionMapper.setContainerRect(rect);
+      }
       if (canvas.width !== rect.width || canvas.height !== rect.height) {
         canvas.width = rect.width;
         canvas.height = rect.height;
-        drawingEngine.setCanvas(canvas);
+        slidesDrawingEngine.setCanvas(canvas);
         const currentKey = getCurrentSlideKey();
         const existingStrokes = annotationsMapRef.current[currentKey] || [];
-        drawingEngine.setStrokes(existingStrokes);
+        slidesDrawingEngine.setStrokes(existingStrokes);
       }
     }
-  }, [getCurrentSlideKey]);
+  }, [getCurrentSlideKey, isActive]);
 
   useEffect(() => {
     updateCanvasSize();
@@ -200,14 +208,29 @@ export const SlidesViewer: React.FC = () => {
     return () => window.removeEventListener('resize', updateCanvasSize);
   }, [updateCanvasSize]);
 
+  useEffect(() => {
+    if (isActive) {
+      const container = slideContainerRef.current;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          actionMapper.setContainerRect(rect);
+        }
+      }
+    }
+  }, [isActive]);
+
   // Save current slide annotations before switching, and restore target slide annotations
   const switchSlide = useCallback(
     (newIndex: number) => {
       if (newIndex < 0 || (totalSlides > 0 && newIndex >= totalSlides)) return;
 
+      // 0. Finalize any active stroke
+      slidesDrawingEngine.endStroke();
+
       // 1. Save current slide annotations to memory
       const currentKey = getCurrentSlideKey();
-      annotationsMapRef.current[currentKey] = drawingEngine.getStrokes();
+      annotationsMapRef.current[currentKey] = slidesDrawingEngine.getStrokes();
 
       // 2. Update slide index
       setCurrentSlideIndex(newIndex);
@@ -215,7 +238,8 @@ export const SlidesViewer: React.FC = () => {
       // 3. Restore target slide annotations from memory
       const nextKey = `${sourceType}-${newIndex}`;
       const savedStrokes = annotationsMapRef.current[nextKey] || [];
-      drawingEngine.setStrokes(savedStrokes);
+      slidesDrawingEngine.setStrokes(savedStrokes);
+      setHistoryVersion((v) => v + 1);
     },
     [getCurrentSlideKey, sourceType, totalSlides]
   );
@@ -235,6 +259,7 @@ export const SlidesViewer: React.FC = () => {
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isActive) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return;
       }
@@ -246,64 +271,79 @@ export const SlidesViewer: React.FC = () => {
         handlePrevSlide();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
-        drawingEngine.undo();
+        slidesDrawingEngine.undo();
+        setHistoryVersion((v) => v + 1);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
         e.preventDefault();
-        drawingEngine.redo();
+        slidesDrawingEngine.redo();
+        setHistoryVersion((v) => v + 1);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNextSlide, handlePrevSlide]);
+  }, [isActive, handleNextSlide, handlePrevSlide]);
 
   // Gestures subscription: Swiping left/right advances slides; Index point draws; Two fingers erases; Fist clears
   useEffect(() => {
     const unsubscribe = actionMapper.subscribe((action: ActionPayload) => {
+      if (!isActive) return;
+
       if (action.type === 'SWIPE_LEFT') {
         handleNextSlide();
       } else if (action.type === 'SWIPE_RIGHT') {
         handlePrevSlide();
       } else if (action.type === 'DRAW_START') {
-        drawingEngine.startStroke(action.point);
+        slidesDrawingEngine.startStroke(action.point);
       } else if (action.type === 'DRAW_MOVE') {
-        drawingEngine.addPoint(action.point);
+        slidesDrawingEngine.addPoint(action.point);
       } else if (action.type === 'DRAW_END') {
-        drawingEngine.endStroke();
+        slidesDrawingEngine.endStroke();
+        setHistoryVersion((v) => v + 1);
       } else if (action.type === 'ERASE') {
-        drawingEngine.eraseAt(action.point, 36);
+        slidesDrawingEngine.eraseAt(action.point, 36);
+        setHistoryVersion((v) => v + 1);
       } else if (action.type === 'CLEAR') {
-        drawingEngine.clear();
+        slidesDrawingEngine.clear();
         const currentKey = getCurrentSlideKey();
         annotationsMapRef.current[currentKey] = [];
+        setHistoryVersion((v) => v + 1);
       }
     });
 
     return () => {
       unsubscribe();
     };
-  }, [handleNextSlide, handlePrevSlide, getCurrentSlideKey]);
+  }, [isActive, handleNextSlide, handlePrevSlide, getCurrentSlideKey]);
+
+  // Clean up any in-progress stroke when tab becomes inactive
+  useEffect(() => {
+    if (!isActive) {
+      slidesDrawingEngine.endStroke();
+    }
+  }, [isActive]);
 
   // Tool changes
   const handleSelectTool = (tool: StrokeTool) => {
     setActiveTool(tool);
-    drawingEngine.setTool(tool);
+    slidesDrawingEngine.setTool(tool);
   };
 
   const handleSelectColor = (color: string) => {
     setActiveColor(color);
-    drawingEngine.setColor(color);
+    slidesDrawingEngine.setColor(color);
   };
 
   const handleSelectSize = (size: number) => {
     setActiveSize(size);
-    drawingEngine.setSize(size);
+    slidesDrawingEngine.setSize(size);
   };
 
   const handleClearSlideAnnotations = () => {
-    drawingEngine.clear();
+    slidesDrawingEngine.clear();
     const currentKey = getCurrentSlideKey();
     annotationsMapRef.current[currentKey] = [];
+    setHistoryVersion((v) => v + 1);
   };
 
   // Mouse drawing handlers on slide canvas
@@ -316,9 +356,10 @@ export const SlidesViewer: React.FC = () => {
 
     setIsDrawingMouse(true);
     if (activeTool === 'eraser') {
-      drawingEngine.eraseAt({ x, y }, activeSize * 2.5, false);
+      slidesDrawingEngine.eraseAt({ x, y }, activeSize * 2.5, false);
+      setHistoryVersion((v) => v + 1);
     } else {
-      drawingEngine.startStroke({ x, y }, false);
+      slidesDrawingEngine.startStroke({ x, y }, false);
     }
   };
 
@@ -331,18 +372,18 @@ export const SlidesViewer: React.FC = () => {
     const y = e.clientY - rect.top;
 
     if (activeTool === 'eraser') {
-      drawingEngine.eraseAt({ x, y }, activeSize * 2.5, false);
+      slidesDrawingEngine.eraseAt({ x, y }, activeSize * 2.5, false);
+      setHistoryVersion((v) => v + 1);
     } else {
-      drawingEngine.addPoint({ x, y }, false);
+      slidesDrawingEngine.addPoint({ x, y }, false);
     }
   };
 
   const handleCanvasMouseUp = () => {
     if (!isDrawingMouse) return;
     setIsDrawingMouse(false);
-    if (activeTool !== 'eraser') {
-      drawingEngine.endStroke();
-    }
+    slidesDrawingEngine.endStroke();
+    setHistoryVersion((v) => v + 1);
   };
 
   // File upload handlers
@@ -351,12 +392,13 @@ export const SlidesViewer: React.FC = () => {
     if (file) {
       // Save current annotations before switching
       const currentKey = getCurrentSlideKey();
-      annotationsMapRef.current[currentKey] = drawingEngine.getStrokes();
+      annotationsMapRef.current[currentKey] = slidesDrawingEngine.getStrokes();
 
       setPdfFile(file);
       setSourceType('pdf');
       setCurrentSlideIndex(0);
-      drawingEngine.clear();
+      slidesDrawingEngine.clear();
+      setHistoryVersion((v) => v + 1);
     }
   };
 
@@ -365,24 +407,26 @@ export const SlidesViewer: React.FC = () => {
     if (files && files.length > 0) {
       // Save current annotations before switching
       const currentKey = getCurrentSlideKey();
-      annotationsMapRef.current[currentKey] = drawingEngine.getStrokes();
+      annotationsMapRef.current[currentKey] = slidesDrawingEngine.getStrokes();
 
       const urls = Array.from(files).map((f) => URL.createObjectURL(f));
       setImageSlides(urls);
       setSourceType('images');
       setCurrentSlideIndex(0);
-      drawingEngine.clear();
+      slidesDrawingEngine.clear();
+      setHistoryVersion((v) => v + 1);
     }
   };
 
   const handleSwitchToDefault = () => {
     const currentKey = getCurrentSlideKey();
-    annotationsMapRef.current[currentKey] = drawingEngine.getStrokes();
+    annotationsMapRef.current[currentKey] = slidesDrawingEngine.getStrokes();
 
     setSourceType('default');
     setCurrentSlideIndex(0);
     const targetKey = 'default-0';
-    drawingEngine.setStrokes(annotationsMapRef.current[targetKey] || []);
+    slidesDrawingEngine.setStrokes(annotationsMapRef.current[targetKey] || []);
+    setHistoryVersion((v) => v + 1);
   };
 
   return (
@@ -573,16 +617,24 @@ export const SlidesViewer: React.FC = () => {
           {/* Undo / Redo */}
           <button
             type="button"
-            onClick={() => drawingEngine.undo()}
-            className="p-1.5 rounded-xl bg-[#FAF4FC] hover:bg-[#FBE8FF] text-[#813DA2] border border-[#EDDCEF] transition-colors cursor-pointer"
+            onClick={() => {
+              slidesDrawingEngine.undo();
+              setHistoryVersion((v) => v + 1);
+            }}
+            disabled={!slidesDrawingEngine.canUndo()}
+            className="p-1.5 rounded-xl bg-[#FAF4FC] hover:bg-[#FBE8FF] text-[#813DA2] border border-[#EDDCEF] transition-colors cursor-pointer disabled:opacity-30 disabled:pointer-events-none"
             title="Undo (Ctrl+Z)"
           >
             <span className="material-symbols-outlined text-[16px]">undo</span>
           </button>
           <button
             type="button"
-            onClick={() => drawingEngine.redo()}
-            className="p-1.5 rounded-xl bg-[#FAF4FC] hover:bg-[#FBE8FF] text-[#813DA2] border border-[#EDDCEF] transition-colors cursor-pointer"
+            onClick={() => {
+              slidesDrawingEngine.redo();
+              setHistoryVersion((v) => v + 1);
+            }}
+            disabled={!slidesDrawingEngine.canRedo()}
+            className="p-1.5 rounded-xl bg-[#FAF4FC] hover:bg-[#FBE8FF] text-[#813DA2] border border-[#EDDCEF] transition-colors cursor-pointer disabled:opacity-30 disabled:pointer-events-none"
             title="Redo (Ctrl+Y)"
           >
             <span className="material-symbols-outlined text-[16px]">redo</span>
@@ -771,6 +823,7 @@ export const SlidesViewer: React.FC = () => {
             onMouseDown={handleCanvasMouseDown}
             onMouseMove={handleCanvasMouseMove}
             onMouseUp={handleCanvasMouseUp}
+            onMouseLeave={handleCanvasMouseUp}
             className={`absolute inset-0 w-full h-full z-20 cursor-crosshair ${
               isAnnotationsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
             }`}

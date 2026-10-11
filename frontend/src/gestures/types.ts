@@ -31,8 +31,11 @@ export type ActionType =
   | 'PINCH'
   | 'PINCH_RELEASE'
   | 'HOVER'
+  | 'OPEN_PALM'
+  | 'ROTATE'
   | 'SWIPE_LEFT'
-  | 'SWIPE_RIGHT';
+  | 'SWIPE_RIGHT'
+  | 'TRACKING_LOST';
 
 export interface ActionPayload {
   type: ActionType;

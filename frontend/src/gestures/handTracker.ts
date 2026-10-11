@@ -15,52 +15,60 @@ export const HAND_CONNECTIONS = HandLandmarker.HAND_CONNECTIONS;
 
 class HandTrackerService {
   private handLandmarker: HandLandmarker | null = null;
-  private isInitializing = false;
+  private initPromise: Promise<void> | null = null;
   private lastVideoTime = -1;
+  private lastProcessedTimestamp = -1;
+  private lastResult: HandTrackerResult = { hasHand: false, landmarks: null };
+  private lastDetectionTime = 0;
+  private lastStage1LogTime = 0;
 
   /**
    * Initializes MediaPipe HandLandmarker with GPU delegate and video running mode.
    * If GPU is unavailable on the machine, falls back gracefully to CPU.
+   * Safely coalesces concurrent initialization calls into a single Promise.
    */
   async initialize(): Promise<void> {
     if (this.handLandmarker) return;
-    if (this.isInitializing) return;
+    if (this.initPromise) return this.initPromise;
 
-    this.isInitializing = true;
-    try {
-      const vision = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
-      );
-
-      const modelAssetPath =
-        'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
-
+    this.initPromise = (async () => {
       try {
-        this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath,
-            delegate: 'GPU',
-          },
-          runningMode: 'VIDEO',
-          numHands: 1,
-        });
-      } catch (gpuErr) {
-        console.warn('GPU delegate failed or unsupported, falling back to CPU:', gpuErr);
-        this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath,
-            delegate: 'CPU',
-          },
-          runningMode: 'VIDEO',
-          numHands: 1,
-        });
+        const vision = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
+        );
+
+        const modelAssetPath =
+          'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+        try {
+          this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath,
+              delegate: 'GPU',
+            },
+            runningMode: 'VIDEO',
+            numHands: 1,
+          });
+        } catch (gpuErr) {
+          console.warn('GPU delegate failed or unsupported, falling back to CPU:', gpuErr);
+          this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath,
+              delegate: 'CPU',
+            },
+            runningMode: 'VIDEO',
+            numHands: 1,
+          });
+        }
+      } catch (err) {
+        console.error('Failed to initialize MediaPipe HandLandmarker:', err);
+        throw err;
+      } finally {
+        this.initPromise = null;
       }
-    } catch (err) {
-      console.error('Failed to initialize MediaPipe HandLandmarker:', err);
-      throw err;
-    } finally {
-      this.isInitializing = false;
-    }
+    })();
+
+    return this.initPromise;
   }
 
   /**
@@ -80,27 +88,56 @@ class HandTrackerService {
       return { hasHand: false, landmarks: null };
     }
 
-    // Process only when new frame is available or timestamp advanced
+    // Process when new frame is available
     if (video.currentTime !== this.lastVideoTime) {
       this.lastVideoTime = video.currentTime;
+      this.lastDetectionTime = timestamp;
+
+      // MediaPipe requires strictly monotonically increasing timestamp
+      const safeTimestamp = Math.max(timestamp, this.lastProcessedTimestamp + 1);
+      this.lastProcessedTimestamp = safeTimestamp;
+
       try {
         const result: HandLandmarkerResult = this.handLandmarker.detectForVideo(
           video,
-          timestamp
+          safeTimestamp
         );
 
-        if (result.landmarks && result.landmarks.length > 0) {
-          return {
+        if (
+          result.landmarks &&
+          result.landmarks.length > 0 &&
+          result.landmarks[0] &&
+          result.landmarks[0].length === 21 &&
+          result.landmarks[0].every(
+            (p) => p && Number.isFinite(p.x) && Number.isFinite(p.y)
+          )
+        ) {
+          this.lastResult = {
             hasHand: true,
             landmarks: result.landmarks[0],
+          };
+
+          if (timestamp - this.lastStage1LogTime >= 1000) {
+            this.lastStage1LogTime = timestamp;
+            console.log('[Abhyas:Stage1] Hand detected (21 landmarks)');
+          }
+        } else {
+          this.lastResult = {
+            hasHand: false,
+            landmarks: null,
           };
         }
       } catch (err) {
         console.warn('Error during hand landmark detection:', err);
       }
+    } else {
+      // If video has stalled/paused for over 500ms, invalidate cached hand
+      if (timestamp - this.lastDetectionTime > 500) {
+        this.lastResult = { hasHand: false, landmarks: null };
+      }
     }
 
-    return { hasHand: false, landmarks: null };
+    return this.lastResult;
   }
 
   /**
@@ -112,7 +149,13 @@ class HandTrackerService {
     width: number,
     height: number
   ): void {
-    if (!landmarks || landmarks.length !== 21) return;
+    if (
+      !landmarks ||
+      landmarks.length !== 21 ||
+      !landmarks.every((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+    ) {
+      return;
+    }
 
     // Draw skeletal connector lines
     ctx.lineWidth = 3;

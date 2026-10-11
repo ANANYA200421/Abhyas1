@@ -36,7 +36,7 @@ export const ActiveSessionPage: React.FC = () => {
           <div className="flex-1 flex gap-5 min-h-0">
             {/* Tab 1: Virtual Blackboard */}
             <div className={`flex-1 flex min-h-0 ${activeTab === 'blackboard' ? '' : 'hidden'}`}>
-              <BlackboardCanvas />
+              <BlackboardCanvas isActive={activeTab === 'blackboard'} />
             </div>
 
             {/* Tab 2: 3D Model Viewer */}
@@ -56,7 +56,7 @@ export const ActiveSessionPage: React.FC = () => {
 
             {/* Tab 5: Slides */}
             <div className={`flex-1 flex min-h-0 ${activeTab === 'slides' ? '' : 'hidden'}`}>
-              <SlidesViewer />
+              <SlidesViewer isActive={activeTab === 'slides'} />
             </div>
 
             {/* Right-Hand Webcam & Gesture Status Panel - Always Persistent */}

@@ -1,7 +1,17 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { actionMapper } from '../../gestures/actionMapper';
 import type { ActionPayload } from '../../gestures/types';
+import {
+  validatePdfFile,
+  extractTextFromItems,
+  clampPage,
+  paginate,
+  searchDocument,
+  navigateMatch,
+  highlightTextMatches,
+  PageTextHighlighter,
+} from './textbookSearch';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
@@ -21,11 +31,21 @@ interface OutlineItem {
   title: string;
   dest?: any;
   pageIndex?: number;
+  pageNumber?: number;
 }
 
+const DEFAULT_SAMPLE_PDF = '/sample_textbook.pdf';
+const DEFAULT_TITLE = 'NCERT Physics - Chapter 1 & 2';
+
 export const TextbookViewer: React.FC = () => {
-  const [pdfFile, setPdfFile] = useState<string | File>('/sample_textbook.pdf');
-  const [numPages, setNumPages] = useState<number>(3);
+  // Document source & metadata
+  const [pdfSource, setPdfSource] = useState<string>(DEFAULT_SAMPLE_PDF);
+  const [documentTitle, setDocumentTitle] = useState<string>(DEFAULT_TITLE);
+  const [isCustomPdf, setIsCustomPdf] = useState<boolean>(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Pagination
+  const [numPages, setNumPages] = useState<number>(0);
   const [pageNumber, setPageNumber] = useState<number>(1);
   const [pageInput, setPageInput] = useState<string>('1');
   const [scale, setScale] = useState<number>(1.15);
@@ -34,9 +54,19 @@ export const TextbookViewer: React.FC = () => {
   const [outline, setOutline] = useState<OutlineItem[]>([]);
   const [isTocOpen, setIsTocOpen] = useState(false);
 
-  // Search
+  // Real Text Extraction & Search
+  const [pagesText, setPagesText] = useState<Map<number, string>>(new Map());
+  const [pageItemsMap, setPageItemsMap] = useState<Map<number, Array<{ str?: string }>>>(new Map());
+  const [isExtractingText, setIsExtractingText] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchMatchesCount, setSearchMatchesCount] = useState<number | null>(null);
+  const [activeMatchIndex, setActiveMatchIndex] = useState<number>(0);
+  const [currentPageItems, setCurrentPageItems] = useState<Array<{ str?: string }>>([]);
+
+  // Multi-span text highlighter for the active page
+  const pageHighlighter = useMemo(() => {
+    const items = pageItemsMap.get(pageNumber) || currentPageItems;
+    return new PageTextHighlighter(items);
+  }, [pageItemsMap, pageNumber, currentPageItems]);
 
   // Bookmarks
   const [bookmarks, setBookmarks] = useState<number[]>([1]); // Default page 1 bookmarked
@@ -49,45 +79,50 @@ export const TextbookViewer: React.FC = () => {
   const [highlightColor, setHighlightColor] = useState<string>('rgba(253, 224, 71, 0.4)'); // Yellow
   const [isHighlighting, setIsHighlighting] = useState<boolean>(false);
 
+  // Refs
   const highlightStartRef = useRef<{ x: number; y: number } | null>(null);
   const pageContainerRef = useRef<HTMLDivElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const pdfDocRef = useRef<any>(null);
+  const abortExtractionRef = useRef<boolean>(false);
 
   const isCurrentPageBookmarked = bookmarks.includes(pageNumber);
 
-  // Handle PDF load success
-  const onDocumentLoadSuccess = async (pdfDoc: any) => {
-    setNumPages(pdfDoc.numPages);
-    try {
-      const docOutline = await pdfDoc.getOutline();
-      if (docOutline && docOutline.length > 0) {
-        setOutline(docOutline);
-      } else {
-        // Fallback default outline for the sample physics book
-        setOutline([
-          { title: 'Chapter 1: Electrostatics', pageIndex: 1 },
-          { title: '1.2 Gauss\'s Law & Flux', pageIndex: 2 },
-          { title: '1.3 Electric Potential & Capacitors', pageIndex: 3 },
-        ]);
-      }
-    } catch (e) {
-      console.warn('Error reading outlines:', e);
+  // Clean up object URLs to prevent memory leaks
+  const cleanupObjectUrl = useCallback(() => {
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
     }
-  };
+  }, []);
+
+  // Cleanup on component unmount
+  useEffect(() => {
+    return () => {
+      abortExtractionRef.current = true;
+      cleanupObjectUrl();
+    };
+  }, [cleanupObjectUrl]);
 
   // Page navigation helpers
-  const goToPage = useCallback((num: number) => {
-    const clamped = Math.max(1, Math.min(numPages, num));
-    setPageNumber(clamped);
-    setPageInput(String(clamped));
-  }, [numPages]);
+  const goToPage = useCallback(
+    (num: number) => {
+      const clamped = clampPage(num, numPages || 1);
+      setPageNumber(clamped);
+      setPageInput(String(clamped));
+    },
+    [numPages]
+  );
 
   const nextPage = useCallback(() => {
-    goToPage(pageNumber + 1);
-  }, [goToPage, pageNumber]);
+    if (numPages <= 0) return;
+    goToPage(paginate(pageNumber, numPages, 1));
+  }, [goToPage, pageNumber, numPages]);
 
   const prevPage = useCallback(() => {
-    goToPage(pageNumber - 1);
-  }, [goToPage, pageNumber]);
+    if (numPages <= 0) return;
+    goToPage(paginate(pageNumber, numPages, -1));
+  }, [goToPage, pageNumber, numPages]);
 
   // Subscribe to gesture actions: Swipe Left (Next) and Swipe Right (Prev)
   useEffect(() => {
@@ -104,13 +139,236 @@ export const TextbookViewer: React.FC = () => {
     };
   }, [nextPage, prevPage]);
 
+  // Extract all text content from loaded PDF pages in background
+  const extractPdfText = useCallback(async (pdfDoc: any) => {
+    abortExtractionRef.current = false;
+    setIsExtractingText(true);
+    const textMap = new Map<number, string>();
+    const itemsMap = new Map<number, Array<{ str?: string }>>();
+    const total = pdfDoc.numPages;
+
+    try {
+      for (let i = 1; i <= total; i++) {
+        if (abortExtractionRef.current) break;
+        try {
+          const page = await pdfDoc.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageStr = extractTextFromItems(textContent.items);
+          textMap.set(i, pageStr);
+          itemsMap.set(i, textContent.items || []);
+          // Stream partial extraction results so search works immediately without waiting for entire book
+          setPagesText(new Map(textMap));
+          setPageItemsMap(new Map(itemsMap));
+        } catch (err) {
+          console.warn(`Could not extract text from page ${i}:`, err);
+          textMap.set(i, '');
+          itemsMap.set(i, []);
+        }
+      }
+    } finally {
+      if (!abortExtractionRef.current) {
+        setIsExtractingText(false);
+      }
+    }
+  }, []);
+
+  // Handle PDF load success
+  const onDocumentLoadSuccess = async (pdfDoc: any) => {
+    pdfDocRef.current = pdfDoc;
+    setNumPages(pdfDoc.numPages);
+    setLoadError(null);
+
+    // Keep page number valid within new document bounds
+    setPageNumber((prev) => clampPage(prev, pdfDoc.numPages));
+    setPageInput((prev) => String(clampPage(parseInt(prev, 10) || 1, pdfDoc.numPages)));
+
+    // Load table of contents outline
+    try {
+      const docOutline = await pdfDoc.getOutline();
+      if (docOutline && docOutline.length > 0) {
+        setOutline(docOutline);
+      } else if (pdfSource === DEFAULT_SAMPLE_PDF) {
+        // Fallback default outline for the sample physics book
+        setOutline([
+          { title: 'Chapter 1: Electrostatics', pageIndex: 1 },
+          { title: "1.2 Gauss's Law & Flux", pageIndex: 2 },
+          { title: '1.3 Electric Potential & Capacitors', pageIndex: 3 },
+        ]);
+      } else {
+        setOutline([]);
+      }
+    } catch (e) {
+      console.warn('Error reading outlines:', e);
+      setOutline([]);
+    }
+
+    // Begin background text extraction for full-text search
+    extractPdfText(pdfDoc);
+  };
+
+  // Handle PDF load error
+  const onDocumentLoadError = (error: Error) => {
+    console.error('Document load error:', error);
+    setLoadError(error.message || 'Failed to render PDF document. The file may be corrupt or protected.');
+    setNumPages(0);
+  };
+
   // Handle User File Upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      setPdfFile(file);
-      setPageNumber(1);
-      setPageInput('1');
+    if (!file) return;
+
+    // Validate uploaded file
+    const validation = validatePdfFile(file);
+    if (!validation.valid) {
+      setLoadError(validation.error || 'Invalid file format. Please upload a valid PDF document.');
+      return;
+    }
+
+    // Cancel existing extraction and release previous object URL
+    abortExtractionRef.current = true;
+    cleanupObjectUrl();
+
+    // Create a new blob object URL
+    const newObjectUrl = URL.createObjectURL(file);
+    objectUrlRef.current = newObjectUrl;
+
+    setLoadError(null);
+    setPdfSource(newObjectUrl);
+    setDocumentTitle(file.name);
+    setIsCustomPdf(true);
+    setPageNumber(1);
+    setPageInput('1');
+    setSearchQuery('');
+    setActiveMatchIndex(0);
+    setPagesText(new Map());
+    setPageItemsMap(new Map());
+    setCurrentPageItems([]);
+
+    // Reset file input value so user can re-upload if needed
+    e.target.value = '';
+  };
+
+  // Restore built-in sample textbook
+  const handleResetToSample = () => {
+    abortExtractionRef.current = true;
+    cleanupObjectUrl();
+    setLoadError(null);
+    setPdfSource(DEFAULT_SAMPLE_PDF);
+    setDocumentTitle(DEFAULT_TITLE);
+    setIsCustomPdf(false);
+    setPageNumber(1);
+    setPageInput('1');
+    setSearchQuery('');
+    setActiveMatchIndex(0);
+    setPagesText(new Map());
+    setPageItemsMap(new Map());
+    setCurrentPageItems([]);
+  };
+
+  // Perform real text search across extracted pages
+  const searchResult = useMemo(() => {
+    return searchDocument(pagesText, searchQuery);
+  }, [pagesText, searchQuery]);
+
+  // Handle search query change
+  const handleSearchChange = (val: string) => {
+    setSearchQuery(val);
+    setActiveMatchIndex(0);
+  };
+
+  // Navigate to Next/Prev search matches
+  const handleNextMatch = () => {
+    if (searchResult.totalMatches === 0) return;
+    const nextIdx = navigateMatch(activeMatchIndex, 1, searchResult.totalMatches);
+    setActiveMatchIndex(nextIdx);
+    const match = searchResult.allMatches[nextIdx];
+    if (match) goToPage(match.pageNumber);
+  };
+
+  const handlePrevMatch = () => {
+    if (searchResult.totalMatches === 0) return;
+    const prevIdx = navigateMatch(activeMatchIndex, -1, searchResult.totalMatches);
+    setActiveMatchIndex(prevIdx);
+    const match = searchResult.allMatches[prevIdx];
+    if (match) goToPage(match.pageNumber);
+  };
+
+  // If search query produces matches and current page has 0 matches, auto-jump to first matching page
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (!trimmed || searchResult.totalMatches === 0) return;
+
+    const currentPageHasMatch = searchResult.matchingPages.some((p) => p.pageNumber === pageNumber);
+    if (!currentPageHasMatch && searchResult.allMatches.length > 0) {
+      const firstMatch = searchResult.allMatches[0];
+      const timer = setTimeout(() => {
+        goToPage(firstMatch.pageNumber);
+        setActiveMatchIndex(0);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [searchQuery, searchResult, pageNumber, goToPage]);
+
+  // Determine if active search match is on the currently displayed page
+  const activeMatchOnCurrentPage = useMemo(() => {
+    if (searchResult.totalMatches === 0) return undefined;
+    const match = searchResult.allMatches[activeMatchIndex];
+    if (match && match.pageNumber === pageNumber) {
+      return match.matchIndexOnPage;
+    }
+    return undefined;
+  }, [searchResult, activeMatchIndex, pageNumber]);
+
+  // Custom text renderer to highlight search terms in the PDF text layer
+  const customTextRenderer = useCallback(
+    ({ str, itemIndex }: { str: string; itemIndex: number }) => {
+      if (!searchQuery.trim()) return str;
+      if (pageHighlighter && pageHighlighter.hasItems) {
+        return pageHighlighter.getHighlightFor(itemIndex, searchQuery, str, activeMatchOnCurrentPage);
+      }
+      return highlightTextMatches(str, searchQuery, activeMatchOnCurrentPage);
+    },
+    [searchQuery, pageHighlighter, activeMatchOnCurrentPage]
+  );
+
+  // Smooth scroll active search match into view within viewport
+  useEffect(() => {
+    if (typeof activeMatchOnCurrentPage === 'number') {
+      const timer = setTimeout(() => {
+        const activeEl = pageContainerRef.current?.querySelector('.pdf-search-match.active');
+        if (activeEl) {
+          activeEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      }, 60);
+      return () => clearTimeout(timer);
+    }
+  }, [activeMatchOnCurrentPage, pageNumber]);
+
+  // Jump to TOC item safely handling destination objects or direct page indices
+  const handleTocClick = async (item: OutlineItem) => {
+    if (typeof item.pageIndex === 'number' && item.pageIndex > 0) {
+      goToPage(item.pageIndex);
+      return;
+    }
+    if (typeof item.pageNumber === 'number' && item.pageNumber > 0) {
+      goToPage(item.pageNumber);
+      return;
+    }
+    if (item.dest && pdfDocRef.current) {
+      try {
+        let dest = item.dest;
+        if (typeof dest === 'string') {
+          dest = await pdfDocRef.current.getDestination(dest);
+        }
+        if (Array.isArray(dest) && dest[0]) {
+          const pageIdx = await pdfDocRef.current.getPageIndex(dest[0]);
+          goToPage(pageIdx + 1);
+          return;
+        }
+      } catch (err) {
+        console.warn('Could not resolve destination for TOC item:', err);
+      }
     }
   };
 
@@ -173,17 +431,30 @@ export const TextbookViewer: React.FC = () => {
     <div className="flex-1 flex flex-col h-[calc(100vh-8.5rem)] relative rounded-2xl overflow-hidden bg-[#FAF4FC] border border-[#EDDCEF] shadow-lg select-none">
       {/* Top Controls Bar */}
       <div className="h-14 bg-white/95 backdrop-blur-md border-b border-[#EDDCEF] px-5 flex items-center justify-between z-20 shadow-xs">
-        {/* Left: Upload, TOC, Bookmarks */}
+        {/* Left: Upload, TOC, Bookmarks, and Reset */}
         <div className="flex items-center gap-2">
           {/* Upload PDF */}
           <label
             title="Upload custom textbook PDF"
-            className="px-3.5 py-1.5 rounded-full bg-[#813DA2] hover:bg-[#702E91] text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+            className="px-3 py-1.5 rounded-full bg-[#813DA2] hover:bg-[#702E91] text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
           >
             <span className="material-symbols-outlined text-[16px]">upload_file</span>
             <span>Upload PDF</span>
             <input type="file" accept="application/pdf" onChange={handleFileUpload} className="hidden" />
           </label>
+
+          {/* Reset to Sample Button when custom PDF is active */}
+          {isCustomPdf && (
+            <button
+              type="button"
+              onClick={handleResetToSample}
+              title="Return to default sample physics book"
+              className="px-2.5 py-1.5 rounded-full bg-[#FAF4FC] hover:bg-[#FBE8FF] text-[#813DA2] border border-[#EDDCEF] text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[15px]">restart_alt</span>
+              <span>Sample Book</span>
+            </button>
+          )}
 
           {/* Table of Contents Drawer Toggle */}
           <button
@@ -226,9 +497,9 @@ export const TextbookViewer: React.FC = () => {
           <button
             type="button"
             onClick={prevPage}
-            disabled={pageNumber <= 1}
+            disabled={numPages <= 0 || pageNumber <= 1}
             title="Previous Page (Swipe Right)"
-            className="w-8 h-8 rounded-full flex items-center justify-center text-[#4D4350] hover:bg-[#F9E0FF] disabled:opacity-30 cursor-pointer"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-[#4D4350] hover:bg-[#F9E0FF] disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer"
           >
             <span className="material-symbols-outlined text-[18px]">chevron_left</span>
           </button>
@@ -239,27 +510,34 @@ export const TextbookViewer: React.FC = () => {
             <input
               type="number"
               min={1}
-              max={numPages}
+              max={numPages || 1}
               value={pageInput}
+              disabled={numPages <= 0}
               onChange={(e) => setPageInput(e.target.value)}
+              onBlur={() => {
+                const val = parseInt(pageInput, 10);
+                if (!isNaN(val)) goToPage(val);
+                else setPageInput(String(pageNumber));
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   const val = parseInt(pageInput, 10);
                   if (!isNaN(val)) goToPage(val);
+                  else setPageInput(String(pageNumber));
                 }
               }}
-              className="w-12 text-center py-1 bg-[#FEEFFF] border border-[#EDDCEF] rounded-lg text-xs font-bold text-[#813DA2] focus:outline-none focus:ring-2 focus:ring-[#813DA2]"
+              className="w-12 text-center py-1 bg-[#FEEFFF] border border-[#EDDCEF] rounded-lg text-xs font-bold text-[#813DA2] focus:outline-none focus:ring-2 focus:ring-[#813DA2] disabled:opacity-50"
             />
-            <span>of {numPages}</span>
+            <span>of {numPages || '–'}</span>
           </div>
 
           {/* Next Page */}
           <button
             type="button"
             onClick={nextPage}
-            disabled={pageNumber >= numPages}
+            disabled={numPages <= 0 || pageNumber >= numPages}
             title="Next Page (Swipe Left)"
-            className="w-8 h-8 rounded-full flex items-center justify-center text-[#4D4350] hover:bg-[#F9E0FF] disabled:opacity-30 cursor-pointer"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-[#4D4350] hover:bg-[#F9E0FF] disabled:opacity-30 disabled:hover:bg-transparent cursor-pointer"
           >
             <span className="material-symbols-outlined text-[18px]">chevron_right</span>
           </button>
@@ -269,7 +547,7 @@ export const TextbookViewer: React.FC = () => {
           {/* Zoom controls */}
           <button
             type="button"
-            onClick={() => setScale((s) => Math.max(0.75, s - 0.15))}
+            onClick={() => setScale((s) => Math.max(0.75, Math.round((s - 0.15) * 100) / 100))}
             title="Zoom Out"
             className="w-7 h-7 rounded-full flex items-center justify-center text-[#4D4350] hover:bg-[#F9E0FF] cursor-pointer"
           >
@@ -282,7 +560,7 @@ export const TextbookViewer: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => setScale((s) => Math.min(2.2, s + 0.15))}
+            onClick={() => setScale((s) => Math.min(2.2, Math.round((s + 0.15) * 100) / 100))}
             title="Zoom In"
             className="w-7 h-7 rounded-full flex items-center justify-center text-[#4D4350] hover:bg-[#F9E0FF] cursor-pointer"
           >
@@ -292,27 +570,89 @@ export const TextbookViewer: React.FC = () => {
 
         {/* Right: Search, Highlighting & Bookmark Current Page */}
         <div className="flex items-center gap-2">
-          {/* Search bar */}
-          <div className="relative">
+          {/* Real Text Search Bar */}
+          <div className="relative flex items-center">
+            <span className="material-symbols-outlined text-[16px] text-[#7A6F83] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
+              search
+            </span>
             <input
               type="text"
               placeholder="Search in book..."
               value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setSearchMatchesCount(e.target.value.trim() ? 3 : null);
-              }}
-              className="pl-8 pr-3 py-1 bg-[#FEEFFF] border border-[#EDDCEF] rounded-full text-xs text-[#2F0346] placeholder-[#7A6F83] focus:outline-none focus:ring-1 focus:ring-[#813DA2] w-36"
+              onChange={(e) => handleSearchChange(e.target.value)}
+              className="pl-8 pr-7 py-1 bg-[#FEEFFF] border border-[#EDDCEF] rounded-full text-xs text-[#2F0346] placeholder-[#7A6F83] focus:outline-none focus:ring-1 focus:ring-[#813DA2] w-40"
             />
-            <span className="material-symbols-outlined text-[16px] text-[#7A6F83] absolute left-2.5 top-1/2 -translate-y-1/2">
-              search
-            </span>
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => handleSearchChange('')}
+                title="Clear search"
+                className="absolute right-2 text-[#7A6F83] hover:text-[#2F0346] text-xs"
+              >
+                ✕
+              </button>
+            )}
           </div>
 
-          {searchMatchesCount !== null && (
-            <span className="text-[10px] font-mono text-emerald-600 font-bold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-              {searchMatchesCount} matches
-            </span>
+          {/* Search Result Feedback & Navigation */}
+          {searchQuery.trim().length > 0 && (
+            <div className="flex items-center gap-1 bg-[#FAF4FC] border border-[#EDDCEF] rounded-full px-2 py-0.5">
+              {isExtractingText && pagesText.size < (numPages || 1) ? (
+                <span className="text-[10px] font-mono text-[#813DA2] font-semibold animate-pulse">
+                  Indexing...
+                </span>
+              ) : searchResult.totalMatches > 0 ? (
+                <>
+                  <span className="text-[10px] font-mono text-emerald-700 font-bold">
+                    {searchResult.totalMatches} {searchResult.totalMatches === 1 ? 'match' : 'matches'}
+                  </span>
+                  <div className="flex items-center ml-1 border-l border-[#EDDCEF] pl-1 gap-0.5">
+                    <button
+                      type="button"
+                      onClick={handlePrevMatch}
+                      title="Previous match"
+                      className="w-4 h-4 flex items-center justify-center text-[#7A6F83] hover:text-[#813DA2]"
+                    >
+                      <span className="material-symbols-outlined text-[12px]">chevron_left</span>
+                    </button>
+                    <span className="text-[9px] font-mono text-[#7A6F83]">
+                      {activeMatchIndex + 1}/{searchResult.totalMatches}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleNextMatch}
+                      title="Next match"
+                      className="w-4 h-4 flex items-center justify-center text-[#7A6F83] hover:text-[#813DA2]"
+                    >
+                      <span className="material-symbols-outlined text-[12px]">chevron_right</span>
+                    </button>
+                  </div>
+                  {searchResult.matchingPages.length > 1 && (
+                    <div className="flex items-center gap-1 ml-1 border-l border-[#EDDCEF] pl-1">
+                      {searchResult.matchingPages.map((mp) => (
+                        <button
+                          key={mp.pageNumber}
+                          type="button"
+                          onClick={() => goToPage(mp.pageNumber)}
+                          className={`px-1.5 py-0.5 rounded-full text-[9px] font-mono font-bold transition-all cursor-pointer ${
+                            pageNumber === mp.pageNumber
+                              ? 'bg-[#813DA2] text-white shadow-xs'
+                              : 'bg-[#FBE8FF] text-[#813DA2] hover:bg-[#F9E0FF]'
+                          }`}
+                          title={`Jump to Page ${mp.pageNumber} (${mp.count} ${mp.count === 1 ? 'match' : 'matches'})`}
+                        >
+                          p.{mp.pageNumber}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="text-[10px] font-mono text-rose-600 font-semibold">
+                  0 matches
+                </span>
+              )}
+            </div>
           )}
 
           {/* Text Highlighter Toggle */}
@@ -335,26 +675,26 @@ export const TextbookViewer: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setHighlightColor('rgba(253, 224, 71, 0.4)')}
-                className="w-4 h-4 rounded-full bg-yellow-300 border border-amber-400"
+                className="w-4 h-4 rounded-full bg-yellow-300 border border-amber-400 cursor-pointer"
                 title="Yellow highlighter"
               />
               <button
                 type="button"
                 onClick={() => setHighlightColor('rgba(217, 136, 237, 0.4)')}
-                className="w-4 h-4 rounded-full bg-purple-300 border border-purple-400"
+                className="w-4 h-4 rounded-full bg-purple-300 border border-purple-400 cursor-pointer"
                 title="Lavender highlighter"
               />
               <button
                 type="button"
                 onClick={() => setHighlightColor('rgba(74, 222, 128, 0.4)')}
-                className="w-4 h-4 rounded-full bg-green-300 border border-green-400"
+                className="w-4 h-4 rounded-full bg-green-300 border border-green-400 cursor-pointer"
                 title="Green highlighter"
               />
               <button
                 type="button"
                 onClick={clearCurrentPageHighlights}
                 title="Clear highlights on this page"
-                className="text-[10px] text-red-600 hover:underline ml-1"
+                className="text-[10px] text-red-600 hover:underline ml-1 cursor-pointer"
               >
                 Clear
               </button>
@@ -379,6 +719,33 @@ export const TextbookViewer: React.FC = () => {
         </div>
       </div>
 
+      {/* Matching Pages Quick Jump Bar (when search has results) */}
+      {searchResult.matchingPages.length > 0 && (
+        <div className="h-8 bg-[#FDF7FF] border-b border-[#EDDCEF] px-5 flex items-center gap-2 overflow-x-auto z-15 text-xs">
+          <span className="text-[11px] font-semibold text-[#813DA2] shrink-0 flex items-center gap-1">
+            <span className="material-symbols-outlined text-[14px]">find_in_page</span>
+            <span>Pages with matches:</span>
+          </span>
+          <div className="flex items-center gap-1.5">
+            {searchResult.matchingPages.map((mp) => (
+              <button
+                key={mp.pageNumber}
+                type="button"
+                onClick={() => goToPage(mp.pageNumber)}
+                className={`px-2 py-0.5 rounded-md text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1 ${
+                  pageNumber === mp.pageNumber
+                    ? 'bg-[#813DA2] text-white shadow-xs'
+                    : 'bg-[#F4E3F7] text-[#813DA2] hover:bg-[#ECD0F2]'
+                }`}
+              >
+                <span>Page {mp.pageNumber}</span>
+                <span className="text-[9px] opacity-75 font-mono">({mp.count})</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden relative">
         {/* Table of Contents Drawer */}
@@ -391,16 +758,20 @@ export const TextbookViewer: React.FC = () => {
               </button>
             </div>
             <div className="space-y-1">
-              {outline.map((item, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  onClick={() => goToPage(item.pageIndex || idx + 1)}
-                  className="w-full text-left px-3 py-2 rounded-xl text-xs font-medium text-[#4D4350] hover:bg-[#FBE8FF] hover:text-[#813DA2] transition-colors"
-                >
-                  {item.title}
-                </button>
-              ))}
+              {outline.length === 0 ? (
+                <p className="text-xs text-[#7A6F83] italic">No chapter outline found in this PDF.</p>
+              ) : (
+                outline.map((item, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => handleTocClick(item)}
+                    className="w-full text-left px-3 py-2 rounded-xl text-xs font-medium text-[#4D4350] hover:bg-[#FBE8FF] hover:text-[#813DA2] transition-colors"
+                  >
+                    {item.title}
+                  </button>
+                ))
+              )}
             </div>
           </aside>
         )}
@@ -423,7 +794,11 @@ export const TextbookViewer: React.FC = () => {
                     key={bmPage}
                     type="button"
                     onClick={() => goToPage(bmPage)}
-                    className="w-full text-left px-3 py-2 rounded-xl text-xs font-semibold bg-[#FAF4FC] hover:bg-[#FBE8FF] text-[#813DA2] flex items-center justify-between transition-colors"
+                    className={`w-full text-left px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between transition-colors ${
+                      pageNumber === bmPage
+                        ? 'bg-[#FBE8FF] text-[#813DA2] border border-[#A55FC6]'
+                        : 'bg-[#FAF4FC] hover:bg-[#FBE8FF] text-[#813DA2]'
+                    }`}
                   >
                     <span>Page {bmPage}</span>
                     <span className="material-symbols-outlined text-[15px]">arrow_forward</span>
@@ -436,76 +811,132 @@ export const TextbookViewer: React.FC = () => {
 
         {/* PDF Page Viewport */}
         <div className="flex-1 overflow-auto flex items-center justify-center p-8 bg-[#EFE4F3]/60 relative">
-          <div
-            ref={pageContainerRef}
-            onMouseDown={handleHighlightMouseDown}
-            onMouseUp={handleHighlightMouseUp}
-            className={`relative bg-white shadow-2xl rounded-sm transition-transform duration-100 ${
-              isHighlighting ? 'cursor-text' : 'cursor-default'
-            }`}
-          >
-            {/* Visible Corner "Dog-Ear" Fold when Page is Bookmarked */}
-            {isCurrentPageBookmarked && (
-              <div
-                title="Bookmarked Page"
-                className="absolute top-0 right-0 w-0 h-0 border-t-[36px] border-t-[#813DA2] border-l-[36px] border-l-transparent drop-shadow-md z-30 pointer-events-none"
-              >
-                <span className="material-symbols-outlined text-white text-[11px] absolute -top-[33px] -right-[0px]">
-                  star
-                </span>
+          {/* Load Error State Card */}
+          {loadError ? (
+            <div className="bg-white border border-rose-200 rounded-2xl p-8 max-w-md shadow-xl text-center flex flex-col items-center gap-3">
+              <div className="w-12 h-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center">
+                <span className="material-symbols-outlined text-[28px]">error</span>
               </div>
-            )}
-
-            {/* In-Memory Highlight Rectangles Overlay Layer */}
-            {(highlights[pageNumber] || []).map((box) => (
-              <div
-                key={box.id}
-                className="absolute pointer-events-none rounded-xs z-20 mix-blend-multiply"
-                style={{
-                  left: box.x,
-                  top: box.y,
-                  width: box.width,
-                  height: box.height,
-                  backgroundColor: box.color,
-                }}
-              />
-            ))}
-
-            {/* React-PDF Document Component */}
-            <Document
-              file={pdfFile}
-              onLoadSuccess={onDocumentLoadSuccess}
-              loading={
-                <div className="p-12 text-center text-xs text-[#7A6F83] font-semibold flex flex-col items-center gap-2">
-                  <div className="w-8 h-8 rounded-full border-2 border-[#813DA2] border-t-transparent animate-spin"></div>
-                  <span>Rendering Textbook Page...</span>
-                </div>
-              }
-              error={
-                <div className="p-10 text-center text-xs text-[#BA1A1A]">
-                  Failed to load PDF. Please check the uploaded file.
-                </div>
-              }
+              <h3 className="text-sm font-bold text-[#2F0346]">Unable to Open PDF Textbook</h3>
+              <p className="text-xs text-rose-600 font-medium leading-relaxed">{loadError}</p>
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={handleResetToSample}
+                  className="px-4 py-2 rounded-full bg-[#813DA2] hover:bg-[#702E91] text-white text-xs font-semibold shadow-xs transition-all cursor-pointer"
+                >
+                  Reload Sample Textbook
+                </button>
+                <label className="px-4 py-2 rounded-full bg-[#FBE8FF] text-[#813DA2] hover:bg-[#F9E0FF] text-xs font-semibold transition-all cursor-pointer">
+                  Upload Other PDF
+                  <input type="file" accept="application/pdf" onChange={handleFileUpload} className="hidden" />
+                </label>
+              </div>
+            </div>
+          ) : (
+            <div
+              ref={pageContainerRef}
+              onMouseDown={handleHighlightMouseDown}
+              onMouseUp={handleHighlightMouseUp}
+              className={`relative bg-white shadow-2xl rounded-sm transition-transform duration-100 ${
+                isHighlighting ? 'cursor-text' : 'cursor-default'
+              }`}
             >
-              <Page
-                pageNumber={pageNumber}
-                scale={scale}
-                renderTextLayer={true}
-                renderAnnotationLayer={true}
-              />
-            </Document>
-          </div>
+              {/* Visible Corner "Dog-Ear" Fold when Page is Bookmarked */}
+              {isCurrentPageBookmarked && (
+                <div
+                  title="Bookmarked Page"
+                  className="absolute top-0 right-0 w-0 h-0 border-t-[36px] border-t-[#813DA2] border-l-[36px] border-l-transparent drop-shadow-md z-30 pointer-events-none"
+                >
+                  <span className="material-symbols-outlined text-white text-[11px] absolute -top-[33px] -right-[0px]">
+                    star
+                  </span>
+                </div>
+              )}
+
+              {/* In-Memory Highlight Rectangles Overlay Layer */}
+              {(highlights[pageNumber] || []).map((box) => (
+                <div
+                  key={box.id}
+                  className="absolute pointer-events-none rounded-xs z-20 mix-blend-multiply"
+                  style={{
+                    left: box.x,
+                    top: box.y,
+                    width: box.width,
+                    height: box.height,
+                    backgroundColor: box.color,
+                  }}
+                />
+              ))}
+
+              {/* React-PDF Document Component */}
+              <Document
+                file={pdfSource}
+                onLoadSuccess={onDocumentLoadSuccess}
+                onLoadError={onDocumentLoadError}
+                onSourceError={onDocumentLoadError}
+                loading={
+                  <div className="p-12 text-center text-xs text-[#7A6F83] font-semibold flex flex-col items-center gap-2">
+                    <div className="w-8 h-8 rounded-full border-2 border-[#813DA2] border-t-transparent animate-spin"></div>
+                    <span>Rendering Textbook Page...</span>
+                  </div>
+                }
+                error={
+                  <div className="bg-white border border-rose-200 rounded-2xl p-8 max-w-md shadow-xl text-center flex flex-col items-center gap-3">
+                    <div className="w-12 h-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center">
+                      <span className="material-symbols-outlined text-[28px]">error</span>
+                    </div>
+                    <h3 className="text-sm font-bold text-[#2F0346]">Unable to Open PDF Textbook</h3>
+                    <p className="text-xs text-rose-600 font-medium leading-relaxed">
+                      {loadError || 'Failed to render PDF document. The file may be corrupt or protected.'}
+                    </p>
+                    <div className="flex items-center gap-2 mt-2">
+                      <button
+                        type="button"
+                        onClick={handleResetToSample}
+                        className="px-4 py-2 rounded-full bg-[#813DA2] hover:bg-[#702E91] text-white text-xs font-semibold shadow-xs transition-all cursor-pointer"
+                      >
+                        Reload Sample Textbook
+                      </button>
+                    </div>
+                  </div>
+                }
+              >
+                {numPages > 0 && (
+                  <Page
+                    key={`${pdfSource}-${pageNumber}`}
+                    pageNumber={pageNumber}
+                    scale={scale}
+                    renderTextLayer={true}
+                    renderAnnotationLayer={true}
+                    customTextRenderer={customTextRenderer}
+                    onGetTextSuccess={(tc: any) => {
+                      if (tc?.items) {
+                        setCurrentPageItems(tc.items);
+                      }
+                    }}
+                  />
+                )}
+              </Document>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Bottom Gesture Navigation Hint Banner */}
+      {/* Bottom Status & Gesture Navigation Hint Banner */}
       <div className="h-8 bg-black/75 backdrop-blur-md px-5 flex items-center justify-between text-[11px] text-white/80 font-mono z-20">
-        <span className="flex items-center gap-1.5">
-          <span>🖐️ Palm Swipe Left: Next Page</span>
-          <span className="text-[#D988ED]">•</span>
-          <span>🖐️ Palm Swipe Right: Previous Page</span>
+        <span className="flex items-center gap-1.5 truncate max-w-[50%]">
+          <span className="material-symbols-outlined text-[13px] text-[#D988ED]">menu_book</span>
+          <span className="truncate text-white/90">{documentTitle}</span>
+          <span className="text-white/40">({numPages > 0 ? `${numPages} pages` : 'Loading...'})</span>
         </span>
-        <span className="text-white/60">Highlights saved per page in-memory</span>
+        <span className="flex items-center gap-2">
+          <span>🖐️ Palm Swipe Left: Next</span>
+          <span className="text-[#D988ED]">•</span>
+          <span>🖐️ Palm Swipe Right: Prev</span>
+          <span className="text-[#D988ED]">•</span>
+          <span className="text-white/60">Highlights saved per page</span>
+        </span>
       </div>
     </div>
   );

@@ -1,11 +1,22 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { WebcamView, type WebcamViewHandle } from '../../components/WebcamView';
 import { actionMapper } from '../../gestures/actionMapper';
-import { drawingEngine, type StrokeTool } from '../../gestures/drawingEngine';
+import { blackboardDrawingEngine, type StrokeTool } from '../../gestures/drawingEngine';
 import { FloatingToolbar, type StrokeSizeType } from './FloatingToolbar';
 import type { ActionPayload } from '../../gestures/types';
 
-export const BlackboardCanvas: React.FC = () => {
+// Map stroke size strings to pixel numbers
+const SIZE_MAP: Record<StrokeSizeType, number> = {
+  fine: 3,
+  medium: 7,
+  bold: 14,
+};
+
+export interface BlackboardCanvasProps {
+  isActive?: boolean;
+}
+
+export const BlackboardCanvas: React.FC<BlackboardCanvasProps> = ({ isActive = true }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const drawingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cursorCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -15,60 +26,59 @@ export const BlackboardCanvas: React.FC = () => {
   const [backdropMode, setBackdropMode] = useState<'camera' | 'slate'>('camera');
   const [fistProgress, setFistProgress] = useState<number>(0);
   const [clearedBanner, setClearedBanner] = useState<boolean>(false);
+  const [, setHistoryVersion] = useState<number>(0);
 
   // Toolbar state
   const [activeTool, setActiveTool] = useState<StrokeTool>('pen');
   const [activeColor, setActiveColor] = useState<string>('#FFFFFF');
   const [activeSize, setActiveSize] = useState<StrokeSizeType>('medium');
 
-  // Map stroke size strings to pixel numbers
-  const sizeMap: Record<StrokeSizeType, number> = {
-    fine: 3,
-    medium: 7,
-    bold: 14,
-  };
-
   const handleToolChange = (tool: StrokeTool) => {
     setActiveTool(tool);
-    drawingEngine.setTool(tool);
+    blackboardDrawingEngine.setTool(tool);
   };
 
   const handleColorChange = (color: string) => {
     setActiveColor(color);
-    drawingEngine.setColor(color);
+    blackboardDrawingEngine.setColor(color);
     if (activeTool === 'eraser') {
       setActiveTool('pen');
-      drawingEngine.setTool('pen');
+      blackboardDrawingEngine.setTool('pen');
     }
   };
 
   const handleSizeChange = (size: StrokeSizeType) => {
     setActiveSize(size);
-    drawingEngine.setSize(sizeMap[size]);
+    blackboardDrawingEngine.setSize(SIZE_MAP[size]);
   };
 
   const handleUndo = useCallback(() => {
-    drawingEngine.undo();
+    blackboardDrawingEngine.undo();
+    setHistoryVersion((v) => v + 1);
   }, []);
 
   const handleRedo = useCallback(() => {
-    drawingEngine.redo();
+    blackboardDrawingEngine.redo();
+    setHistoryVersion((v) => v + 1);
   }, []);
 
   const handleClear = useCallback(() => {
-    drawingEngine.clear();
+    blackboardDrawingEngine.clear();
+    setFistProgress(0);
     setClearedBanner(true);
+    setHistoryVersion((v) => v + 1);
     setTimeout(() => setClearedBanner(false), 2000);
   }, []);
 
   const handleSavePNG = useCallback(() => {
     const video = webcamRef.current?.getVideoElement();
-    drawingEngine.exportCompositePNG(video);
+    blackboardDrawingEngine.exportCompositePNG(video);
   }, []);
 
   // Keyboard shortcuts: Ctrl+Z (Undo) and Ctrl+Y / Ctrl+Shift+Z (Redo)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isActive) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) {
@@ -86,9 +96,9 @@ export const BlackboardCanvas: React.FC = () => {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [handleUndo, handleRedo]);
+  }, [isActive, handleUndo, handleRedo]);
 
-  // Resize canvases to match container dimensions
+  // Resize canvases to match container dimensions and sync with actionMapper
   const updateCanvasDimensions = useCallback(() => {
     const container = containerRef.current;
     const drawingCanvas = drawingCanvasRef.current;
@@ -98,54 +108,97 @@ export const BlackboardCanvas: React.FC = () => {
 
     const rect = container.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
+      if (isActive) {
+        actionMapper.setContainerRect(rect);
+      }
       if (drawingCanvas.width !== rect.width || drawingCanvas.height !== rect.height) {
         drawingCanvas.width = rect.width;
         drawingCanvas.height = rect.height;
         cursorCanvas.width = rect.width;
         cursorCanvas.height = rect.height;
-        drawingEngine.setCanvas(drawingCanvas);
+        blackboardDrawingEngine.setCanvas(drawingCanvas);
       }
     }
-  }, []);
+  }, [isActive]);
 
   useEffect(() => {
+    const container = containerRef.current;
+    let observer: ResizeObserver | null = null;
+
+    if (container && typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        updateCanvasDimensions();
+      });
+      observer.observe(container);
+    }
+
     updateCanvasDimensions();
     window.addEventListener('resize', updateCanvasDimensions);
     return () => {
+      if (observer) {
+        observer.disconnect();
+      }
       window.removeEventListener('resize', updateCanvasDimensions);
+      if (isActive) {
+        actionMapper.setContainerRect(null);
+      }
     };
-  }, [updateCanvasDimensions]);
+  }, [updateCanvasDimensions, isActive]);
 
   // Subscribe to gesture actions from the gesture engine
   useEffect(() => {
     const drawingCanvas = drawingCanvasRef.current;
     if (drawingCanvas) {
-      drawingEngine.setCanvas(drawingCanvas);
-      drawingEngine.setTool(activeTool);
-      drawingEngine.setColor(activeColor);
-      drawingEngine.setSize(sizeMap[activeSize]);
+      blackboardDrawingEngine.setCanvas(drawingCanvas);
+      blackboardDrawingEngine.setTool(activeTool);
+      blackboardDrawingEngine.setColor(activeColor);
+      blackboardDrawingEngine.setSize(SIZE_MAP[activeSize]);
     }
 
+    let lastStage5LogTime = 0;
     const unsubscribe = actionMapper.subscribe((action: ActionPayload) => {
+      if (!isActive) return;
+
       const cursorCanvas = cursorCanvasRef.current;
       const ctx = cursorCanvas?.getContext('2d');
 
-      // 1. Gesture Actions
+      // 1. Loss of tracking: clean up immediately
+      if (action.type === 'TRACKING_LOST') {
+        blackboardDrawingEngine.endStroke();
+        setFistProgress(0);
+        if (cursorCanvas && ctx) {
+          ctx.clearRect(0, 0, cursorCanvas.width, cursorCanvas.height);
+        }
+        setHistoryVersion((v) => v + 1);
+        return;
+      }
+
+      if (['DRAW_START', 'DRAW_MOVE', 'ERASE', 'CLEAR'].includes(action.type)) {
+        const now = performance.now();
+        if (now - lastStage5LogTime >= 1000 || action.type === 'DRAW_START' || action.type === 'CLEAR') {
+          lastStage5LogTime = now;
+          console.log(`[Abhyas:Stage5] BlackboardCanvas action: ${action.type} at (${action.point.x.toFixed(2)}, ${action.point.y.toFixed(2)})`);
+        }
+      }
+
+      // 2. Gesture Actions
       switch (action.type) {
         case 'DRAW_START':
-          drawingEngine.startStroke(action.point);
+          blackboardDrawingEngine.startStroke(action.point);
           break;
 
         case 'DRAW_MOVE':
-          drawingEngine.addPoint(action.point);
+          blackboardDrawingEngine.addPoint(action.point);
           break;
 
         case 'DRAW_END':
-          drawingEngine.endStroke();
+          blackboardDrawingEngine.endStroke();
+          setHistoryVersion((v) => v + 1);
           break;
 
         case 'ERASE':
-          drawingEngine.eraseAt(action.point, action.pressure || 32);
+          blackboardDrawingEngine.eraseAt(action.point, action.pressure || 32);
+          setHistoryVersion((v) => v + 1);
           break;
 
         case 'CLEAR':
@@ -153,7 +206,7 @@ export const BlackboardCanvas: React.FC = () => {
           break;
       }
 
-      // 2. Cursor & Progress Reticle Drawing on Cursor Overlay Canvas
+      // 3. Cursor & Progress Reticle Drawing on Cursor Overlay Canvas
       if (cursorCanvas && ctx) {
         ctx.clearRect(0, 0, cursorCanvas.width, cursorCanvas.height);
 
@@ -201,7 +254,7 @@ export const BlackboardCanvas: React.FC = () => {
           ctx.save();
           ctx.beginPath();
           ctx.arc(x, y, action.type === 'HOVER' ? 5 : 7, 0, 2 * Math.PI);
-          ctx.fillStyle = drawingEngine.getColor();
+          ctx.fillStyle = blackboardDrawingEngine.getColor();
           ctx.shadowColor = '#D988ED';
           ctx.shadowBlur = 8;
           ctx.fill();
@@ -215,9 +268,16 @@ export const BlackboardCanvas: React.FC = () => {
 
     return () => {
       unsubscribe();
-      drawingEngine.setCanvas(null);
     };
-  }, [activeTool, activeColor, activeSize, handleClear]);
+  }, [isActive, activeTool, activeColor, activeSize, handleClear]);
+
+  // Clean up any in-progress stroke when tab becomes inactive
+  useEffect(() => {
+    if (!isActive) {
+      blackboardDrawingEngine.endStroke();
+      setFistProgress(0);
+    }
+  }, [isActive]);
 
   // Mouse fallback drawing support
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -228,10 +288,10 @@ export const BlackboardCanvas: React.FC = () => {
       x: (e.clientX - rect.left) / rect.width,
       y: (e.clientY - rect.top) / rect.height,
     };
-    if (drawingEngine.getTool() === 'eraser') {
-      drawingEngine.eraseAt(point, 30);
+    if (blackboardDrawingEngine.getTool() === 'eraser') {
+      blackboardDrawingEngine.eraseAt(point, 30);
     } else {
-      drawingEngine.startStroke(point);
+      blackboardDrawingEngine.startStroke(point);
     }
   };
 
@@ -244,15 +304,16 @@ export const BlackboardCanvas: React.FC = () => {
       x: (e.clientX - rect.left) / rect.width,
       y: (e.clientY - rect.top) / rect.height,
     };
-    if (drawingEngine.getTool() === 'eraser') {
-      drawingEngine.eraseAt(point, 30);
+    if (blackboardDrawingEngine.getTool() === 'eraser') {
+      blackboardDrawingEngine.eraseAt(point, 30);
     } else {
-      drawingEngine.addPoint(point);
+      blackboardDrawingEngine.addPoint(point);
     }
   };
 
   const handleMouseUp = () => {
-    drawingEngine.endStroke();
+    blackboardDrawingEngine.endStroke();
+    setHistoryVersion((v) => v + 1);
   };
 
   return (
@@ -351,6 +412,8 @@ export const BlackboardCanvas: React.FC = () => {
         onRedo={handleRedo}
         onClear={handleClear}
         onSavePNG={handleSavePNG}
+        canUndo={blackboardDrawingEngine.canUndo()}
+        canRedo={blackboardDrawingEngine.canRedo()}
       />
 
       {/* Flash Banner when FIST clears board */}

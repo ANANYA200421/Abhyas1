@@ -1,4 +1,4 @@
-import type { Point2D } from './types';
+import type { Point2D } from './types.ts';
 
 /**
  * Velocity-adaptive Exponential Moving Average filter for smooth, jitter-free cursor tracking.

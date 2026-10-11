@@ -41,3 +41,16 @@ export interface CircuitCheckResult {
   reason: string;
   details: string[];
 }
+
+export interface SolverResult {
+  isClosedLoop: boolean;
+  isShortCircuit: boolean;
+  activeComponentIds: Set<string>;
+  currentAmps: number;
+  voltage: number;
+  equivalentResistance: number;
+  componentCurrents: Record<string, number>;
+  componentVoltages: Record<string, number>;
+  shortCircuitReason?: string;
+  circuitTopology: 'series' | 'parallel' | 'complex' | 'open' | 'short';
+}

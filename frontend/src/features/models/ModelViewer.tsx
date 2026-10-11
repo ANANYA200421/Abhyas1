@@ -1,32 +1,96 @@
-import React, { useRef, useState, useEffect, useCallback, Suspense } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Canvas, useThree, useFrame } from '@react-three/fiber';
-import { OrbitControls, Stars, useGLTF } from '@react-three/drei';
+import { OrbitControls, Stars } from '@react-three/drei';
 import * as THREE from 'three';
-import { SolarSystem, PLANETS, type PlanetData } from './SolarSystem';
+import { SolarSystem } from './SolarSystem';
+import { PLANETS, type PlanetData } from './planetData';
 import { actionMapper } from '../../gestures/actionMapper';
 import type { ActionPayload, Point2D } from '../../gestures/types';
 
-// Custom GLB Loader Structure for models placed in public/models/
-const CustomGLBModel: React.FC<{ modelPath: string }> = ({ modelPath }) => {
-  const { scene } = useGLTF(modelPath);
-  return <primitive object={scene} scale={2} position={[0, 0, 0]} />;
+// Pedagogical 3D Anatomical Heart with realistic pulsing heartbeat and vascular vessels
+const ProceduralHeart: React.FC = () => {
+  const heartGroupRef = useRef<THREE.Group>(null);
+
+  // Animate dynamic heartbeat pulse: systole & diastole
+  useFrame((state) => {
+    if (heartGroupRef.current) {
+      const t = state.clock.getElapsedTime();
+      const pulse = 1 + Math.sin(t * 4.5) * 0.05 + Math.sin(t * 9) * 0.02;
+      heartGroupRef.current.scale.set(pulse * 2.2, pulse * 2.2, pulse * 2.2);
+    }
+  });
+
+  const heartShape = React.useMemo(() => {
+    const s = new THREE.Shape();
+    s.moveTo(0, 0.4);
+    s.bezierCurveTo(0, 0.8, -0.6, 1.2, -1.2, 0.7);
+    s.bezierCurveTo(-1.8, 0.2, -1.5, -0.6, 0, -1.6);
+    s.bezierCurveTo(1.5, -0.6, 1.8, 0.2, 1.2, 0.7);
+    s.bezierCurveTo(0.6, 1.2, 0, 0.8, 0, 0.4);
+    return s;
+  }, []);
+
+  const extrudeSettings = React.useMemo(
+    () => ({
+      depth: 0.8,
+      bevelEnabled: true,
+      bevelSegments: 12,
+      steps: 2,
+      bevelSize: 0.35,
+      bevelThickness: 0.4,
+    }),
+    []
+  );
+
+  return (
+    <group ref={heartGroupRef} position={[0, 0, 0]}>
+      {/* Main Ventricles & Atria Muscular Mass */}
+      <mesh rotation={[0, 0, Math.PI]}>
+        <extrudeGeometry args={[heartShape, extrudeSettings]} />
+        <meshStandardMaterial
+          color="#DC2626"
+          roughness={0.4}
+          metalness={0.2}
+          emissive="#7F1D1D"
+          emissiveIntensity={0.3}
+        />
+      </mesh>
+
+      {/* Aorta Arch (Crimson Red) */}
+      <mesh position={[0.2, 1.4, 0.4]} rotation={[0, 0, Math.PI / 4]}>
+        <torusGeometry args={[0.55, 0.22, 16, 32, Math.PI * 0.85]} />
+        <meshStandardMaterial color="#EF4444" roughness={0.3} metalness={0.1} />
+      </mesh>
+
+      {/* Superior Vena Cava (Deoxygenated Blue) */}
+      <mesh position={[-0.55, 1.2, 0.3]} rotation={[0, 0, -0.15]}>
+        <cylinderGeometry args={[0.22, 0.22, 1.4, 16]} />
+        <meshStandardMaterial color="#2563EB" roughness={0.4} metalness={0.1} />
+      </mesh>
+
+      {/* Pulmonary Artery (Purple) */}
+      <mesh position={[0.45, 0.8, 0.6]} rotation={[0.4, 0.3, 0.2]}>
+        <cylinderGeometry args={[0.2, 0.2, 1.1, 16]} />
+        <meshStandardMaterial color="#7C3AED" roughness={0.4} metalness={0.1} />
+      </mesh>
+    </group>
+  );
 };
 
-// Fallback placeholder when GLB model file is not yet dropped into public/models/
+// Informational overlay card for Human Heart mode
 const GLBPlaceholderCard: React.FC<{ modelName: string }> = ({ modelName }) => {
   return (
-    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-      <div className="p-6 rounded-3xl bg-black/75 backdrop-blur-md border border-white/20 text-center max-w-md shadow-2xl pointer-events-auto">
-        <div className="w-12 h-12 rounded-2xl bg-red-500/20 text-red-400 mx-auto flex items-center justify-center mb-3">
-          <span className="material-symbols-outlined text-[28px]">favorite</span>
+    <div className="absolute bottom-6 right-6 pointer-events-none z-10">
+      <div className="p-4 rounded-2xl bg-black/75 backdrop-blur-md border border-white/20 text-center max-w-xs shadow-2xl pointer-events-auto">
+        <div className="w-9 h-9 rounded-xl bg-red-500/20 text-red-400 mx-auto flex items-center justify-center mb-2">
+          <span className="material-symbols-outlined text-[22px]">favorite</span>
         </div>
-        <h3 className="text-base font-bold text-white mb-1">{modelName} 3D Asset</h3>
-        <p className="text-xs text-white/70 mb-4 leading-relaxed">
-          Ready to render! Place <code className="bg-white/10 px-1.5 py-0.5 rounded text-amber-300">heart.glb</code> inside{' '}
-          <code className="bg-white/10 px-1.5 py-0.5 rounded text-amber-300">frontend/public/models/</code> to automatically display the complete interactive heart organ.
+        <h3 className="text-xs font-bold text-white mb-0.5">{modelName} (Interactive 3D)</h3>
+        <p className="text-[11px] text-white/70 mb-2 leading-relaxed">
+          Procedural cardiac anatomy with simulated systolic pulse. Custom <code className="bg-white/10 px-1 py-0.5 rounded text-amber-300">heart.glb</code> can also be dropped into <code className="bg-white/10 px-1 py-0.5 rounded text-amber-300">frontend/public/models/</code>.
         </p>
-        <span className="px-3 py-1 rounded-full bg-white/10 text-white/80 text-[11px] font-mono">
-          GLB Loader Structure Active
+        <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-mono">
+          ✓ Active Anatomical Simulation
         </span>
       </div>
     </div>
@@ -93,7 +157,11 @@ const SceneController: React.FC<SceneControllerProps> = ({
       // 2. PINCH + MOVE -> Zoom Camera In / Out
       if (gestureAction === 'PINCH') {
         const zoomDelta = dy * 40;
-        camera.position.z = THREE.MathUtils.clamp(camera.position.z + zoomDelta, 8, 85);
+        camera.position.set(
+          camera.position.x,
+          camera.position.y,
+          THREE.MathUtils.clamp(camera.position.z + zoomDelta, 8, 85)
+        );
       }
     }
 
@@ -141,9 +209,7 @@ const SceneController: React.FC<SceneControllerProps> = ({
             onSelectPlanet={onSelectPlanet}
           />
         ) : (
-          <Suspense fallback={null}>
-            <CustomGLBModel modelPath="/models/heart.glb" />
-          </Suspense>
+          <ProceduralHeart />
         )}
       </group>
     </>

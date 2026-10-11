@@ -40,6 +40,8 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const isMountedRef = useRef<boolean>(true);
+  const hasAcquiredStreamRef = useRef<boolean>(false);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorType, setErrorType] = useState<CameraErrorType>(null);
@@ -51,6 +53,7 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
   const currentFpsRef = useRef<number>(0);
   const lastTelemetryUpdateRef = useRef<number>(0);
   const lastDetectedStateRef = useRef<boolean>(false);
+  const lastHandDetectedTimeRef = useRef<number>(0);
 
   // Expose video and canvas elements to parent components via ref
   useImperativeHandle(ref, () => ({
@@ -60,19 +63,28 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
 
   // Cleanly terminate camera tracks and frame loop
   const stopStream = useCallback(() => {
-    activeStreamUsers = Math.max(0, activeStreamUsers - 1);
+    if (hasAcquiredStreamRef.current) {
+      activeStreamUsers = Math.max(0, activeStreamUsers - 1);
+      hasAcquiredStreamRef.current = false;
+    }
+
     if (activeStreamUsers === 0 && sharedMediaStream) {
       sharedMediaStream.getTracks().forEach((track) => track.stop());
       sharedMediaStream = null;
     }
     streamRef.current = null;
 
+    if (videoRef.current) {
+      videoRef.current.onloadedmetadata = null;
+      videoRef.current.srcObject = null;
+    }
+
     if (animationFrameRef.current !== null) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
     if (enableTracking) {
-      actionMapper.reset();
+      actionMapper.processNoHand();
     }
   }, [enableTracking]);
 
@@ -85,6 +97,10 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
       if (canvas && (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight)) {
         canvas.width = video.videoWidth || 640;
         canvas.height = video.videoHeight || 480;
+      }
+
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        actionMapper.setVideoDimensions(video.videoWidth, video.videoHeight);
       }
 
       const now = performance.now();
@@ -104,11 +120,14 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
       // 2. Gesture Recognition & Action Mapping
       let gesture: RecognizedGesture;
       if (hasHand && landmarks) {
+        lastHandDetectedTimeRef.current = now;
         gesture = gestureRecognizer.recognize(landmarks, now);
         actionMapper.processGesture(gesture, now);
       } else {
         gesture = { type: 'NONE', confidence: 0, cursor: { x: 0.5, y: 0.5 } };
-        actionMapper.processGesture(gesture, now);
+        if (now - lastHandDetectedTimeRef.current > 150) {
+          actionMapper.processNoHand(now);
+        }
       }
 
       // 3. Draw Landmark Skeleton on Canvas Overlay (if enabled)
@@ -143,6 +162,7 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
 
   // Request camera and initialize MediaPipe
   const startCamera = useCallback(async () => {
+    if (!isMountedRef.current) return;
     setIsLoading(true);
     setErrorType(null);
     setErrorMessage('');
@@ -151,6 +171,8 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
       if (enableTracking) {
         await handTracker.initialize();
       }
+
+      if (!isMountedRef.current) return;
 
       let stream: MediaStream;
       if (
@@ -171,23 +193,49 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
         sharedMediaStream = stream;
       }
 
-      activeStreamUsers++;
+      if (!isMountedRef.current) {
+        if (sharedMediaStream === stream && activeStreamUsers === 0) {
+          stream.getTracks().forEach((track) => track.stop());
+          sharedMediaStream = null;
+        }
+        return;
+      }
+
+      if (!hasAcquiredStreamRef.current) {
+        activeStreamUsers++;
+        hasAcquiredStreamRef.current = true;
+      }
       streamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play().then(() => {
-            setIsLoading(false);
-            if (enableTracking && animationFrameRef.current === null) {
-              animationFrameRef.current = requestAnimationFrame(processFrame);
-            }
-          }).catch((err) => {
-            console.error('Video playback failed:', err);
-          });
+      const video = videoRef.current;
+      if (video) {
+        video.srcObject = stream;
+        const onLoaded = () => {
+          if (!isMountedRef.current) return;
+          video
+            .play()
+            .then(() => {
+              if (!isMountedRef.current) return;
+              setIsLoading(false);
+              if (enableTracking && animationFrameRef.current === null) {
+                animationFrameRef.current = requestAnimationFrame(processFrame);
+              }
+            })
+            .catch((err) => {
+              if (isMountedRef.current) {
+                console.error('Video playback failed:', err);
+              }
+            });
         };
+
+        if (video.readyState >= 1) {
+          onLoaded();
+        } else {
+          video.onloadedmetadata = onLoaded;
+        }
       }
     } catch (err: unknown) {
+      if (!isMountedRef.current) return;
       setIsLoading(false);
       console.error('Webcam initialization failed:', err);
 
@@ -218,9 +266,16 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
     }
   }, [processFrame, enableTracking]);
 
+  const handleRetry = useCallback(() => {
+    stopStream();
+    startCamera();
+  }, [stopStream, startCamera]);
+
   useEffect(() => {
+    isMountedRef.current = true;
     startCamera();
     return () => {
+      isMountedRef.current = false;
       stopStream();
     };
   }, [startCamera, stopStream]);
@@ -282,7 +337,7 @@ export const WebcamView = forwardRef<WebcamViewHandle, WebcamViewProps>(({
 
           <button
             type="button"
-            onClick={startCamera}
+            onClick={handleRetry}
             className="px-5 py-2 rounded-full bg-[#A55FC6] hover:bg-[#7A3A9A] text-white text-xs font-semibold shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
           >
             <span className="material-symbols-outlined text-[16px]">refresh</span>

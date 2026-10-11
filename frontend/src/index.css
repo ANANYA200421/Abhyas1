@@ -41,3 +41,21 @@
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+/* Smart Textbook search match highlight styling */
+.pdf-search-match {
+  background-color: rgba(253, 224, 71, 0.75) !important;
+  color: #1e1b4b !important;
+  border-radius: 2px;
+  padding: 0 1px;
+  box-shadow: 0 0 2px rgba(234, 179, 8, 0.6);
+  transition: all 0.15s ease-in-out;
+}
+
+.pdf-search-match.active {
+  background-color: #f97316 !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 6px rgba(249, 115, 22, 0.9);
+  outline: 2px solid #ea580c;
+  z-index: 10;
+}

@@ -1,16 +1,32 @@
 import React, { useEffect, useState } from 'react';
 import { actionMapper } from '../gestures/actionMapper';
-import type { ActionPayload, Point2D } from '../gestures/types';
+import type { ActionPayload } from '../gestures/types';
 
 export const GestureCursor: React.FC = () => {
-  const [point, setPoint] = useState<Point2D | null>(null);
+  const [coords, setCoords] = useState<{ x: number; y: number } | null>(null);
   const [isPinching, setIsPinching] = useState(false);
   const [isErasing, setIsErasing] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
 
   useEffect(() => {
+    let lastLogTime = 0;
     const unsubscribe = actionMapper.subscribe((action: ActionPayload) => {
-      setPoint(action.point);
+      if (action.type === 'TRACKING_LOST') {
+        setCoords(null);
+        setIsDrawing(false);
+        setIsPinching(false);
+        setIsErasing(false);
+        return;
+      }
+
+      const clientCoords = actionMapper.toClientCoords(action.point);
+      setCoords(clientCoords);
+
+      const now = performance.now();
+      if (now - lastLogTime >= 1000) {
+        lastLogTime = now;
+        console.log(`[Abhyas:Stage4] GestureCursor visible at (${Math.round(clientCoords.x)}, ${Math.round(clientCoords.y)})`);
+      }
 
       if (action.type === 'PINCH') {
         setIsPinching(true);
@@ -36,14 +52,14 @@ export const GestureCursor: React.FC = () => {
     };
   }, []);
 
-  if (!point) return null;
+  if (!coords) return null;
 
   return (
     <div
       className="fixed pointer-events-none z-50 transition-transform duration-75 ease-out -translate-x-1/2 -translate-y-1/2"
       style={{
-        left: `${point.x * 100}vw`,
-        top: `${point.y * 100}vh`,
+        left: `${coords.x}px`,
+        top: `${coords.y}px`,
       }}
     >
       {/* Dynamic Cursor Ring */}
